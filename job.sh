@@ -5,5 +5,6 @@
 #$ -cwd
 #$ -M chrisjbillington@gmail.com
 #$ -m abe
+#$ -N vortex_tangle
 
 python run.py
