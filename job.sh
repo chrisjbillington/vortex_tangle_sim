@@ -8,4 +8,5 @@
 #$ -N vortex_tangle
 #$ -pe smp 2
 
-python run.py
+export OMP_NUM_THREADS=$NSLOTS
+mpiexec python run.py
