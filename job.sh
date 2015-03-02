@@ -6,5 +6,6 @@
 #$ -M chrisjbillington@gmail.com
 #$ -m abe
 #$ -N vortex_tangle
+#$ -pe smp 2
 
 python run.py
