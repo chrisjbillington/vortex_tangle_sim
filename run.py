@@ -20,18 +20,17 @@ FINAL = (RANK == SIZE - 1)
 #     dset = f.create_dataset('test', (size,), dtype=int)
 #     dset[rank] = rank**2
 
-x = np.zeros((2*SIZE,256), dtype=int)
+N = 100000
+x = np.zeros((1,), dtype=int)
 if ROOT:
     start_time = time.time()
-for i in range(10000):
+for i in range(N):
     if not ROOT:
         comm.Recv(x, source=RANK-1)
-        x[RANK,:] += RANK
     if not FINAL:
         comm.Send(x, dest=RANK+1)
     if not FINAL:
         comm.Recv(x, source=RANK+1)
-    x[-RANK-1,:] += RANK
     if not ROOT:
         comm.Send(x, dest=RANK-1)
 if ROOT:
@@ -40,3 +39,4 @@ if ROOT:
         dset = f.create_dataset('test', data=x)
         dset.attrs['n_cores'] = SIZE
         dset.attrs['time taken'] = time_taken
+        dset.attrs['time_per_send'] = time_taken/(2*SIZE*N)
