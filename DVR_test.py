@@ -1,5 +1,5 @@
 from __future__ import division
-from pylab import plot, show, grid, subplot, ylim, title
+from pylab import figure, plot, show, grid, subplot, ylim, title, axvline, tight_layout
 import numpy as np
 
 
@@ -64,7 +64,7 @@ class DVRBasis(object):
         self.x_r = x_r
         self.quadrature = quadrature
         if self.quadrature == 'legendre':
-            self.x, self.w = gauss_lobatto_points_and_weights(N)
+            self.x, self.w = gauss_legendre_points_and_weights(N)
         elif self.quadrature == 'lobatto':
             self.x, self.w = gauss_lobatto_points_and_weights(N)
         else:
@@ -72,9 +72,15 @@ class DVRBasis(object):
         # Shift the quadrature points from the interval [-1, 1] to [x_l, x_r], and
         # scale the weights appropriately:
         self.x = (self.x + 1)*(x_r - x_l)/2 + x_l
-        self.w /= (x_r - x_l)/2
+        self.w *= (x_r - x_l)/2
         # Make the DVR basis functions:
         self.u = make_DVR_basis_polynomials(self.x, self.w)
+
+    def valid(self, x_dense):
+        """returns array of bools for which elements of x_dense are within the
+        domain [self.x_l, self.x_r]"""
+        valid = (self.x_l <= x_dense) & (x_dense <= self.x_r)
+        return valid
 
     def make_vector(self, x_dense, psi_dense):
         """Takes points x_dense and the values psi_dense of a function at those
@@ -82,7 +88,7 @@ class DVRBasis(object):
         function's representation in that DVR basis. Only the part of the function
         in the interval [self.x_l, self.x_r] is used."""
         psi = np.zeros(self.N)
-        valid = (self.x_l <= x_dense) & (x_dense <= self.x_r)
+        valid = self.valid(x_dense)
         x_dense = x_dense[valid]
         psi_dense = psi_dense[valid]
         for i, u_i in enumerate(self.u):
@@ -100,8 +106,7 @@ class DVRBasis(object):
                 import IPython
                 IPython.embed()
         # Clip outside the valid region:
-        valid = (self.x_l <= x_dense) & (x_dense <= self.x_r)
-        f[~valid] = 0
+        f[~self.valid(x_dense)] = 0
         return f
 
     def differential_operator(self, order=1):
@@ -134,19 +139,19 @@ def test_single_element():
 
     # Get our quadrature points and weights, our DVR basis functions, and
     # our differential operator in the DVR basis:
-    dvr_basis = DVRBasis(N, -1, 1, 'lobatto')
+    dvr_basis = DVRBasis(N, -2, 2, 'lobatto')
     x = dvr_basis.x
     w = dvr_basis.w
     u = dvr_basis.u
     dn_dxn = dvr_basis.differential_operator(differentiation_order)
 
     # A dense grid for making plots
-    x_dense = np.linspace(-1,1,1000)
+    x_dense = np.linspace(dvr_basis.x_l, dvr_basis.x_r, 1000)
     dx = x_dense[1] - x_dense[0]
 
     # Our Gaussian wavefunction, its representation in the DVR basis,
     # and that representation's interpolation back onto the dense grid:
-    psi_dense = np.exp(-x_dense**2)
+    psi_dense = np.exp(-x_dense**2/(4))
     psi = dvr_basis.make_vector(x_dense, psi_dense)
     psi_interpolated = dvr_basis.interpolate_vector(psi, x_dense)
 
@@ -158,8 +163,9 @@ def test_single_element():
     d_psi_dx_interpolated = dvr_basis.interpolate_vector(d_psi_dx, x_dense)
 
     # Plot the DVR basis functions:
+    figure()
     subplot(211)
-    title('DVR basis polynomials')
+    title('DVR basis functions')
     for x_i, u_i in zip(x, u):
         plot(x_dense, u_i(x_dense))
         plot(x_i, u_i(x_i), 'ko')
@@ -171,7 +177,7 @@ def test_single_element():
     subplot(223)
     title('Exact and DVR Gaussian')
     plot(x_dense, psi_dense, 'b-')
-    plot(x_dense, psi_interpolated, 'r-')
+    plot(x_dense, psi_interpolated, 'r--')
     plot(x, psi/np.sqrt(w), 'ko')
     grid(True)
     ylim(-0,1)
@@ -180,12 +186,72 @@ def test_single_element():
     subplot(224)
     title('Exact and DVR derivative')
     plot(x_dense, d_psi_dense_dx, 'b-')
-    plot(x_dense, d_psi_dx_interpolated, 'r-')
+    plot(x_dense, d_psi_dx_interpolated, 'r--')
     plot(x, d_psi_dx/np.sqrt(w), 'ko')
     grid(True)
     ylim(-1,1)
 
+    tight_layout()
+
+
+def test_two_elements():
+    N = 7
+    n_elements = 4
+    differentiation_order = 2
+
+    # A dense grid for making plots
+    x_dense = np.linspace(-2,2,1000)
+    dx = x_dense[1] - x_dense[0]
+    boundaries = np.linspace(x_dense.min(), x_dense.max(), n_elements + 1, endpoint=True)
+
+    elements = []
+    for (x_l, x_r) in zip(boundaries, boundaries[1:]):
+        dvr_basis = DVRBasis(N, x_l, x_r, 'lobatto')
+        elements.append(dvr_basis)
+
+    # Our Gaussian wavefunction, its representation in the DVR basis,
+    # and that representation's interpolation back onto the dense grid:
+    psi_dense = np.exp(-x_dense**2)
+    psi = [element.make_vector(x_dense, psi_dense) for element in elements]
+    psi_interpolated = [element.interpolate_vector(psi_n, x_dense) for psi_n,element in zip(psi, elements)]
+
+    # Plot the FEDVR basis functions:
+    figure()
+    subplot(211)
+    title('FEDVR basis functions')
+    for element in elements:
+        for x_i, u_i in zip(element.x, element.u):
+            valid = element.valid(x_dense)
+            plot(x_dense[valid], u_i(x_dense[valid]))
+            plot(x_i, u_i(x_i), 'ko')
+        plot(element.x, np.zeros(element.N), 'ko')
+    for boundary in boundaries:
+        axvline(boundary, linestyle='--', color='k')
+    grid(True)
+
+    # plot the
+    ylim(-1,6)
+
+    # Plot the wavefunction and its interpolated FEDVR representation:
+    subplot(212)
+    title('Exact and FEDVR Gaussian')
+    plot(x_dense, psi_dense, 'b-')
+    for element, psi_n, psi_interpolated_n in zip(elements, psi_n, psi_interpolated):
+        valid = element.valid(x_dense)
+        plot(x_dense[valid], psi_interpolated_n[valid], 'r--')
+        plot(element.x, psi_n/np.sqrt(element.w), 'ko')
+        grid(True)
+        ylim(-0,1)
+        plot(element.x, np.zeros(element.N), 'ko')
+    for boundary in boundaries:
+        axvline(boundary, linestyle='--', color='k')
+    grid(True)
+
+
+    tight_layout()
+
+
+if __name__ == '__main__':
+    test_single_element()
+    test_two_elements()
     show()
-
-
-test_single_element()
