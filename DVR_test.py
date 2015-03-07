@@ -1,5 +1,5 @@
 from __future__ import division
-from pylab import plot, show, grid, subplot, ylim, title, figure
+from pylab import plot, show, grid, subplot, ylim, title
 import numpy as np
 
 
@@ -32,15 +32,16 @@ def gauss_lobatto_points_and_weights(N):
 
 
 def make_DVR_basis(x, w):
-    """Returns a list of numpy.poly1d objects representing the basis functions
+    """Returns a list of numpy Polynomial objects representing the basis functions
     of the discrete variable representation using the the Gauss quadrature with points
     x and weights w."""
+    from numpy.polynomial.polynomial import Polynomial, polyfromroots
     u = []
     for x_i, w_i in zip(x, w):
-        u_i = np.poly1d([1/np.sqrt(w_i)])
-        for x_q in x:
-            if x_q != x_i:
-                u_i *= np.poly1d([x_q], True)/(x_i - x_q)
+        # Each DVR basis function is simply a polynomial with zeros at all the
+        # other points, scaled to equal 1/sqrt(w_i) at its own point.
+        other_points = np.array([x_q for x_q in x if x_q != x_i])
+        u_i = 1/np.sqrt(w_i)*Polynomial(polyfromroots(other_points))/np.prod(x_i - other_points)
         u.append(u_i)
     return u
 
