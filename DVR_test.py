@@ -82,17 +82,15 @@ class DVRBasis(object):
         valid = (self.x_l <= x_dense) & (x_dense <= self.x_r)
         return valid
 
-    def make_vector(self, x_dense, psi_dense):
-        """Takes points x_dense and the values psi_dense of a function at those
-        points, and returns an array containing the coefficients for that
+    def make_vector(self, f):
+        """Takes a function of space f, and returns an array containing the coefficients for that
         function's representation in that DVR basis. Only the part of the function
-        in the interval [self.x_l, self.x_r] is used."""
+        in the interval [self.x_l, self.x_r] is used and represented."""
+        from scipy.integrate import quad
         psi = np.zeros(self.N)
-        valid = self.valid(x_dense)
-        x_dense = x_dense[valid]
-        psi_dense = psi_dense[valid]
         for i, u_i in enumerate(self.u):
-            psi[i] = np.trapz(psi_dense*u_i(x_dense), x_dense)
+            projection, accuracy = quad(lambda x: f(x)*u_i(x), self.x_l, self.x_r, epsrel=1e-12, epsabs=0)
+            psi[i] = projection
         return psi
 
     def interpolate_vector(self, psi, x_dense):
@@ -151,8 +149,12 @@ def test_single_element():
 
     # Our Gaussian wavefunction, its representation in the DVR basis,
     # and that representation's interpolation back onto the dense grid:
-    psi_dense = np.exp(-x_dense**2/(4))
-    psi = dvr_basis.make_vector(x_dense, psi_dense)
+
+    def f(x):
+        return np.exp(-x**2/4)
+
+    psi_dense = f(x_dense)
+    psi = dvr_basis.make_vector(f)
     psi_interpolated = dvr_basis.interpolate_vector(psi, x_dense)
 
     # The derivative of our Gaussian wavefunction, the derivative of its
@@ -194,7 +196,7 @@ def test_single_element():
     tight_layout()
 
 
-def test_two_elements():
+def test_multiple_elements():
     N = 7
     n_elements = 4
     differentiation_order = 2
@@ -211,8 +213,12 @@ def test_two_elements():
 
     # Our Gaussian wavefunction, its representation in the DVR basis,
     # and that representation's interpolation back onto the dense grid:
-    psi_dense = np.exp(-x_dense**2)
-    psi = [element.make_vector(x_dense, psi_dense) for element in elements]
+    def f(x):
+        return np.exp(-x**2)
+
+    psi_dense = f(x_dense)
+
+    psi = [element.make_vector(f) for element in elements]
     psi_interpolated = [element.interpolate_vector(psi_n, x_dense) for psi_n,element in zip(psi, elements)]
 
     # Plot the FEDVR basis functions:
@@ -228,15 +234,13 @@ def test_two_elements():
     for boundary in boundaries:
         axvline(boundary, linestyle='--', color='k')
     grid(True)
-
-    # plot the
-    ylim(-1,6)
+    ylim(-1,7)
 
     # Plot the wavefunction and its interpolated FEDVR representation:
     subplot(212)
     title('Exact and FEDVR Gaussian')
     plot(x_dense, psi_dense, 'b-')
-    for element, psi_n, psi_interpolated_n in zip(elements, psi_n, psi_interpolated):
+    for element, psi_n, psi_interpolated_n in zip(elements, psi, psi_interpolated):
         valid = element.valid(x_dense)
         plot(x_dense[valid], psi_interpolated_n[valid], 'r--')
         plot(element.x, psi_n/np.sqrt(element.w), 'ko')
@@ -253,5 +257,5 @@ def test_two_elements():
 
 if __name__ == '__main__':
     test_single_element()
-    test_two_elements()
+    test_multiple_elements()
     show()
