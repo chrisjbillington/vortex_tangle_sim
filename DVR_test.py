@@ -190,13 +190,13 @@ class Element(object):
         """"Return a (self.N x self.N) array for the matrix representation of the derivative
         operator of a given order in the DVR basis."""
         # Differentiate the basis functions to the given order:
-        dn_u_dxn = [u_i.deriv(order) for u_i in self.u]
+        dn_u_dxn = [basis_function.polynomial.deriv(order) for basis_function in self.basis]
         dn_dxn = np.zeros((self.N,self.N))
-        for i, u_i in enumerate(self.u):
+        for i, basis_function in enumerate(self.basis):
             for j, dn_u_j_dxn in enumerate(dn_u_dxn):
                 # Compute one matrix element <u_i | dn_dxn u_j> using the quadrature rule:
-                for x_n, w_n in zip(self.x, self.w):
-                    dn_dxn[i, j] += w_n*u_i(x_n)*dn_u_j_dxn(x_n)
+                for point, weight in zip(self.points, self.weights):
+                    dn_dxn[i, j] += weight*basis_function(point)*dn_u_j_dxn(point)
         return dn_dxn
 
 
@@ -217,7 +217,7 @@ def test_single_element():
     points = element.points
     weights = element.weights
     basis = element.basis
-    # dn_dxn = dvr_basis.differential_operator(differentiation_order)
+    dn_dxn = element.differential_operator(differentiation_order)
 
     # A dense grid for making plots
     x = np.linspace(element.left_boundary, element.right_boundary, 1000)
@@ -236,9 +236,9 @@ def test_single_element():
     # The derivative of our Gaussian wavefunction, the derivative of its
     # representation in the DVR basis (computed with the DVR derivative
     # operator), and that derivatives interpolation back onto the dense grid:
-    # d_psi_dense_dx = gradientn(psi_dense, dx, differentiation_order)
-    # d_psi_dx = np.dot(dn_dxn, psi)
-    # d_psi_dx_interpolated = dvr_basis.interpolate_vector(d_psi_dx, x_dense)
+    d_psi_dense_dx = gradientn(psi_dense, dx, differentiation_order)
+    d_psi_dx = np.dot(dn_dxn, psi)
+    d_psi_dx_interpolated = element.interpolate_vector(d_psi_dx, x)
 
     # Plot the DVR basis functions:
     figure()
@@ -262,12 +262,12 @@ def test_single_element():
 
     # Plot the derivative of the wavefunction and its interpolated DVR representation:
     subplot(224)
-    # title('Exact and DVR derivative')
-    # plot(x_dense, d_psi_dense_dx, 'b-')
-    # plot(x_dense, d_psi_dx_interpolated, 'r--')
-    # plot(x, d_psi_dx/np.sqrt(w), 'ko')
-    # grid(True)
-    # ylim(-1,1)
+    title('Exact and DVR derivative')
+    plot(x, d_psi_dense_dx, 'b-')
+    plot(x, d_psi_dx_interpolated, 'r--')
+    plot(points, d_psi_dx/np.sqrt(weights), 'ko')
+    grid(True)
+    ylim(-1,1)
 
     tight_layout()
 
