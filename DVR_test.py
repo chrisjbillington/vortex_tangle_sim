@@ -133,6 +133,7 @@ class Element(object):
                                             left_weights[-1], self.weights[0],
                                             left_boundary - width_left, right_boundary,
                                             self.points[0])
+            self.weights[0] += left_weights[-1]
         else:
             # It's a normal, non bridge basis function, an 'element function':
             basis_function = ElementFunction(shapefunctions[0], self.weights[0],
@@ -154,6 +155,7 @@ class Element(object):
                                             self.weights[-1], right_weights[0],
                                             left_boundary, right_boundary + width_right,
                                             self.points[-1])
+            self.weights[-1] += right_weights[0]
         else:
             # It's a normal, non bridge basis function, an 'element function':
             basis_function = ElementFunction(shapefunctions[-1], self.weights[-1],
@@ -190,7 +192,22 @@ class Element(object):
         """"Return a (self.N x self.N) array for the matrix representation of the derivative
         operator of a given order in the DVR basis."""
         # Differentiate the basis functions to the given order:
-        dn_u_dxn = [basis_function.polynomial.deriv(order) for basis_function in self.basis]
+        dn_u_dxn = []
+        if isinstance(self.basis[0], BridgeFunction):
+            polynomial = self.basis[0].right_segment
+        else:
+            polynomial = self.basis[0].polynomial
+        dn_u_dxn.append(polynomial.deriv(order))
+
+        for basis_function in self.basis[1:-1]:
+            dn_u_dxn.append(basis_function.polynomial.deriv(order))
+
+        if isinstance(self.basis[-1], BridgeFunction):
+            polynomial = self.basis[-1].left_segment
+        else:
+            polynomial = self.basis[-1].polynomial
+        dn_u_dxn.append(polynomial.deriv(order))
+
         dn_dxn = np.zeros((self.N,self.N))
         for i, basis_function in enumerate(self.basis):
             for j, dn_u_j_dxn in enumerate(dn_u_dxn):
@@ -208,7 +225,7 @@ def gradientn(y, dx, n=1):
 
 
 def test_single_element():
-    N = 7
+    N = 9
     differentiation_order = 1
 
     # Get our quadrature points and weights, our DVR basis functions, and
@@ -227,7 +244,7 @@ def test_single_element():
     # and that representation's interpolation back onto the dense grid:
 
     def f(x):
-        return np.exp(-x**2/4)
+        return np.exp(-x**2)
 
     psi_dense = f(x)
     psi = element.make_vector(f)
@@ -242,7 +259,7 @@ def test_single_element():
 
     # Plot the DVR basis functions:
     figure()
-    subplot(211)
+    subplot(311)
     title('DVR basis functions')
     for point, basis_function in zip(points, basis):
         plot(x, basis_function(x))
@@ -252,7 +269,7 @@ def test_single_element():
     ylim(-1,6)
 
     # Plot the wavefunction and its interpolated DVR representation:
-    subplot(223)
+    subplot(312)
     title('Exact and DVR Gaussian')
     plot(x, psi_dense, 'b-')
     plot(x, psi_interpolated, 'r--')
@@ -261,7 +278,7 @@ def test_single_element():
     ylim(-0,1)
 
     # Plot the derivative of the wavefunction and its interpolated DVR representation:
-    subplot(224)
+    subplot(313)
     title('Exact and DVR derivative')
     plot(x, d_psi_dense_dx, 'b-')
     plot(x, d_psi_dx_interpolated, 'r--')
@@ -274,7 +291,7 @@ def test_single_element():
 
 def test_multiple_elements():
     N = 7
-    n_elements = 3
+    n_elements = 4
     differentiation_order = 2
 
     # A dense grid for making plots
@@ -295,13 +312,15 @@ def test_multiple_elements():
         return np.exp(-x**2)
 
     psi_dense = f(x)
-
     psi = [e.make_vector(f) for e in elements]
     psi_interpolated = [e.interpolate_vector(psi_n, x) for psi_n, e in zip(psi, elements)]
 
+    # The exact derivative of the wavefunction:
+    d_psi_dense_dx = gradientn(psi_dense, dx, differentiation_order)
+
     # Plot the FEDVR basis functions:
     figure()
-    subplot(211)
+    subplot(311)
     title('FEDVR basis functions')
     for element in elements:
         for point, weight, basis_function in zip(element.points, element.weights, element.basis):
@@ -313,38 +332,10 @@ def test_multiple_elements():
     grid(True)
     ylim(-1,7)
 
-    # # Plot the derivatives of the FEDVR basis functions:
-    # subplot(222)
-    # title('derivative of FEDVR basis functions')
-    # for element in elements:
-    #     for x_i, u_i in zip(element.x, element.u):
-    #         valid = element.valid(x_dense)
-    #         plot(x_dense[valid], u_i.deriv()(x_dense[valid]))
-    #         plot(x_i, u_i.deriv()(x_i), 'ko')
-    #     plot(element.x, np.zeros(element.N), 'ko')
-    # for boundary in boundaries:
-    #     axvline(boundary, linestyle='--', color='k')
-    # grid(True)
-    # ylim(-200,200)
-
-    # # Plot the second derivatives of the FEDVR basis functions:
-    # subplot(224)
-    # title('second derivative of FEDVR basis functions')
-    # for element in elements:
-    #     for x_i, u_i in zip(element.x, element.u):
-    #         valid = element.valid(x_dense)
-    #         plot(x_dense[valid], u_i.deriv(2)(x_dense[valid]))
-    #         plot(x_i, u_i.deriv(2)(x_i), 'ko')
-    #     plot(element.x, np.zeros(element.N), 'ko')
-    # for boundary in boundaries:
-    #     axvline(boundary, linestyle='--', color='k')
-    # grid(True)
-    # ylim(-2000,2000)
-
     # Plot the wavefunction and its interpolated FEDVR representation:
-    subplot(212)
+    subplot(312)
     title('Exact and FEDVR Gaussian')
-    plot(x, psi_dense, 'b-')
+    plot(x, psi_dense, 'k-')
     for element, psi_n, psi_interpolated_n in zip(elements, psi, psi_interpolated):
         plot(element.points, psi_n/np.sqrt(element.weights), 'ko')
         plot(element.points, np.zeros(element.N), 'ko')
@@ -354,6 +345,30 @@ def test_multiple_elements():
     grid(True)
     ylim(-0,1)
 
+    # Plot the derivative of the wavefunction:
+    subplot(313)
+    title('Exact and FEDVR derivative of Gaussian')
+    plot(x, d_psi_dense_dx, 'k-')
+    d_psi_dx = []
+    for element, psi_n in zip(elements, psi):
+        dn_dxn = element.differential_operator(differentiation_order)
+        d_psi_n_dx = np.dot(dn_dxn, psi_n)
+        d_psi_dx.append(d_psi_n_dx)
+    for left_element, right_element, left_deriv, right_deriv in zip(elements, elements[1:], d_psi_dx, d_psi_dx[1:]):
+        left_weight = left_element.weights[-1]
+        right_weight = right_element.weights[0]
+        bridge_derivative = (left_weight*left_deriv[-1] + right_weight*right_deriv[0])/(left_weight + right_weight)
+        left_deriv[-1] = right_deriv[0] = bridge_derivative
+
+    for element, psi_n , d_psi_n_dx in zip(elements, psi, d_psi_dx):
+        d_psi_dx_interpolated = element.interpolate_vector(d_psi_n_dx, x)
+        plot(element.points, d_psi_n_dx/np.sqrt(element.weights), 'ko')
+        plot(element.points, np.zeros(element.N), 'ko')
+        plot(x, d_psi_dx_interpolated, '--')
+    for boundary in boundaries:
+        axvline(boundary, linestyle='--', color='k')
+    grid(True)
+    ylim(-2,1)
     tight_layout()
 
 
