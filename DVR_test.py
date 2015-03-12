@@ -1,6 +1,7 @@
 from __future__ import division, print_function
-from pylab import figure, plot, show, grid, subplot, ylim, title, axvline, tight_layout
+from pylab import figure, plot, show, grid, subplot, ylim, title, axvline, tight_layout, imshow, gca
 from numpy.polynomial.polynomial import Polynomial
+from matplotlib import ticker
 import numpy as np
 
 def gauss_lobatto_points_and_weights(N, left_boundary, right_boundary):
@@ -288,8 +289,10 @@ def test_multiple_elements():
     x = np.linspace(-2,2,100000)
     dx = x[1] - x[0]
     boundaries = np.array([-2,-1,-0.5,-0.25,0,1,2])
+    # boundaries = np.linspace(-2,2,6, endpoint=True)
     widths = np.diff(boundaries)
-    N = [7,8,9,10,7,6,9]
+    N = [7,8,9,10,7,6]
+    # N = np.zeros(len(widths)) + 7
     n_elements = len(boundaries) - 1
 
     differentiation_order = 2
@@ -317,7 +320,7 @@ def test_multiple_elements():
 
     # Plot the FEDVR basis functions:
     figure()
-    subplot(311)
+    subplot(231)
     title('FEDVR basis functions')
     for element in elements:
         for point, weight, basis_function in zip(element.points, element.weights, element.basis):
@@ -329,7 +332,7 @@ def test_multiple_elements():
     ylim(-2,10)
 
     # Plot the wavefunction and its interpolated FEDVR representation:
-    subplot(312)
+    subplot(232)
     title('Exact and FEDVR Gaussian')
     plot(x, psi_dense, 'k-')
     for element, psi_n, psi_interpolated_n in zip(elements, psi, psi_interpolated):
@@ -343,8 +346,8 @@ def test_multiple_elements():
     ylim(-0,1)
 
     # Plot the derivative of the wavefunction:
-    subplot(313)
-    title('Exact and FEDVR derivative of Gaussian')
+    subplot(233)
+    title('Exact and FEDVR elementwise derivative')
     plot(x, d_psi_dense_dx, 'k-')
     d_psi_dx = []
     for element, psi_n in zip(elements, psi):
@@ -364,10 +367,59 @@ def test_multiple_elements():
         axvline(boundary, linestyle='--', color='k')
     grid(True)
     ylim(-2,1)
-    tight_layout()
+
+    # Plot the derivative of the wavefunction using the total derivative operator:
+    subplot(234)
+    title('Total derivative operator')
+
+    d_psi_dx = []
+    for element, psi_n in zip(elements, psi):
+        dn_dxn = element.differential_operator(differentiation_order)
+    # Lets construct the overall derivative operator:
+    total_N = sum(N) - n_elements + 1
+    D_total = np.zeros((total_N, total_N))
+    psi_total = np.zeros(total_N)
+    weights = np.zeros(total_N)
+    points = np.zeros(total_N)
+    start_index = 0
+    for i, element in enumerate(elements):
+        dn_dxn = element.differential_operator(differentiation_order)
+        end_index = start_index + N[i]
+        D_total[start_index:end_index, start_index:end_index] += dn_dxn
+        psi_total[start_index:end_index] = psi[i]
+        for j, (point, basis_function) in enumerate(zip(element.points, element.basis)):
+            weights[start_index+j] = basis_function(point)
+            points[start_index+j] = point
+        start_index += N[i] - 1
+
+    D_plot = D_total.copy()
+    D_plot[D_plot==0] = np.nan
+    D_plot = np.sign(D_plot)*np.log(np.abs(D_plot))
+    imshow(D_plot, interpolation='nearest')
+    loc = ticker.IndexLocator(base=1, offset=0)
+    ax = gca()
+    ax.xaxis.set_minor_locator(loc)
+    ax.yaxis.set_minor_locator(loc)
+    ax.grid(which='minor', axis='both', linestyle='-')
+
+    subplot(235)
+    title('Exact and FEDVR derivative with total operator')
+    plot(x, d_psi_dense_dx, 'k-')
+    d_psi_total_dx = weights*np.dot(D_total, psi_total)
+    plot(points, d_psi_total_dx, 'ko')
+    for element, psi_n , d_psi_n_dx in zip(elements, psi, d_psi_dx):
+        valid = element.valid(x)
+        d_psi_dx_interpolated = element.interpolate_vector(d_psi_n_dx, x)
+        for i, point in enumerate(element.points):
+            plot(point, d_psi_n_dx[i]*element.basis[i](point), 'ko')
+        plot(x[valid], d_psi_dx_interpolated[valid], '--')
+    for boundary in boundaries:
+        axvline(boundary, linestyle='--', color='k')
+    grid(True)
+    ylim(-2,1)
 
 
 if __name__ == '__main__':
-    test_single_element()
+    # test_single_element()
     test_multiple_elements()
     show()
