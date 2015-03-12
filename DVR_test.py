@@ -133,7 +133,6 @@ class Element(object):
                                             left_weights[-1], self.weights[0],
                                             left_boundary - width_left, right_boundary,
                                             self.points[0])
-            self.weights[0] += left_weights[-1]
         else:
             # It's a normal, non bridge basis function, an 'element function':
             basis_function = ElementFunction(shapefunctions[0], self.weights[0],
@@ -155,9 +154,8 @@ class Element(object):
                                             self.weights[-1], right_weights[0],
                                             left_boundary, right_boundary + width_right,
                                             self.points[-1])
-            self.weights[-1] += right_weights[0]
         else:
-            # It's a normal, non bridge basis function, an 'element function':
+            # It's a normal, non bridge basis function; an 'element function':
             basis_function = ElementFunction(shapefunctions[-1], self.weights[-1],
                                              left_boundary, right_boundary)
         self.basis.append(basis_function)
@@ -171,13 +169,9 @@ class Element(object):
     def make_vector(self, f):
         """Takes a function of space f, and returns an array containing the coefficients for that
         function's representation in this element's DVR basis."""
-        from scipy.integrate import quad
         psi = np.zeros(self.N)
-        for i, basis_function in enumerate(self.basis):
-            projection, accuracy = quad(lambda x: f(x)*basis_function(x),
-                                        basis_function.left_boundary,
-                                        basis_function.right_boundary)
-            psi[i] = projection
+        for i, (point, weight) in enumerate(zip(self.points, self.weights)):
+            psi[i] = f(point)/self.basis[i](point)
         return psi
 
     def interpolate_vector(self, psi, x_dense):
@@ -290,20 +284,23 @@ def test_single_element():
 
 
 def test_multiple_elements():
-    N = 7
-    n_elements = 4
-    differentiation_order = 2
-
     # A dense grid for making plots
-    x = np.linspace(-2,2,1000)
+    x = np.linspace(-2,2,100000)
     dx = x[1] - x[0]
-    boundaries = np.linspace(x.min(), x.max(), n_elements + 1, endpoint=True)
+    boundaries = np.array([-2,-1,-0.5,-0.25,0,1,2])
+    widths = np.diff(boundaries)
+    N = [7,8,9,10,7,6,9]
+    n_elements = len(boundaries) - 1
+
+    differentiation_order = 2
 
     elements = []
     for i, (x_l, x_r) in enumerate(zip(boundaries, boundaries[1:])):
-        N_left = N if i > 0 else None
-        N_right = N if i < n_elements - 1 else None
-        element = Element(N, x_l, x_r, N_left, N_right, width_left=(x_r-x_l), width_right=(x_r-x_l))
+        N_left = N[i-1] if i > 0 else None
+        N_right = N[i+1] if i < n_elements - 1 else None
+        width_left = widths[i-1] if i > 0 else None
+        width_right = widths[i+1] if i < n_elements - 1 else None
+        element = Element(N[i], x_l, x_r, N_left, N_right, width_left=width_left, width_right=width_right)
         elements.append(element)
 
     # Our Gaussian wavefunction, its representation in the DVR basis,
@@ -325,21 +322,21 @@ def test_multiple_elements():
     for element in elements:
         for point, weight, basis_function in zip(element.points, element.weights, element.basis):
             plot(x, basis_function(x))
-            plot(point, 1/np.sqrt(weight), 'ko')
-        plot(element.points, np.zeros(element.N), 'ko')
+            plot(point, 1*basis_function(point), 'ko')
     for boundary in boundaries:
         axvline(boundary, linestyle='--', color='k')
     grid(True)
-    ylim(-1,7)
+    ylim(-2,10)
 
     # Plot the wavefunction and its interpolated FEDVR representation:
     subplot(312)
     title('Exact and FEDVR Gaussian')
     plot(x, psi_dense, 'k-')
     for element, psi_n, psi_interpolated_n in zip(elements, psi, psi_interpolated):
-        plot(element.points, psi_n/np.sqrt(element.weights), 'ko')
-        plot(element.points, np.zeros(element.N), 'ko')
-        plot(x, psi_interpolated_n, '--')
+        valid = element.valid(x)
+        for point, basis_function, c in zip(element.points, element.basis, psi_n):
+            plot(point, c*basis_function(point), 'ko')
+        plot(x[valid], psi_interpolated_n[valid], '--')
     for boundary in boundaries:
         axvline(boundary, linestyle='--', color='k')
     grid(True)
@@ -354,17 +351,15 @@ def test_multiple_elements():
         dn_dxn = element.differential_operator(differentiation_order)
         d_psi_n_dx = np.dot(dn_dxn, psi_n)
         d_psi_dx.append(d_psi_n_dx)
-    for left_element, right_element, left_deriv, right_deriv in zip(elements, elements[1:], d_psi_dx, d_psi_dx[1:]):
-        left_weight = left_element.weights[-1]
-        right_weight = right_element.weights[0]
-        bridge_derivative = (left_weight*left_deriv[-1] + right_weight*right_deriv[0])/(left_weight + right_weight)
-        left_deriv[-1] = right_deriv[0] = bridge_derivative
+    for left_deriv, right_deriv in zip(d_psi_dx, d_psi_dx[1:]):
+        left_deriv[-1] = right_deriv[0] = left_deriv[-1] + right_deriv[0]
 
     for element, psi_n , d_psi_n_dx in zip(elements, psi, d_psi_dx):
+        valid = element.valid(x)
         d_psi_dx_interpolated = element.interpolate_vector(d_psi_n_dx, x)
-        plot(element.points, d_psi_n_dx/np.sqrt(element.weights), 'ko')
-        plot(element.points, np.zeros(element.N), 'ko')
-        plot(x, d_psi_dx_interpolated, '--')
+        for i, point in enumerate(element.points):
+            plot(point, d_psi_n_dx[i]*element.basis[i](point), 'ko')
+        plot(x[valid], d_psi_dx_interpolated[valid], '--')
     for boundary in boundaries:
         axvline(boundary, linestyle='--', color='k')
     grid(True)
