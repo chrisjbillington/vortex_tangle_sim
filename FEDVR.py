@@ -161,10 +161,10 @@ class Element(object):
                                              left_boundary, right_boundary)
         self.basis.append(basis_function)
 
-    def valid(self, x_dense):
-        """returns array of bools for which elements of x_dense are within the
+    def valid(self, x):
+        """returns array of bools for which elements of x are within the
         domain [self.left_boundary, self.right_boundary]"""
-        valid = (self.left_boundary <= x_dense) & (x_dense <= self.right_boundary)
+        valid = (self.left_boundary <= x) & (x <= self.right_boundary)
         return valid
 
     def make_vector(self, f):
@@ -175,12 +175,12 @@ class Element(object):
             psi[i] = f(point)/self.basis[i](point)
         return psi
 
-    def interpolate_vector(self, psi, x_dense):
+    def interpolate_vector(self, psi, x):
         """Takes a vector psi in the DVR basis and interpolates the spatial
-        function it represents to the points in the array x_dense"""
-        f = np.zeros(len(x_dense))
+        function it represents to the points in the array x"""
+        f = np.zeros(len(x))
         for psi_i, basis_function in zip(psi, self.basis):
-            f += psi_i*basis_function(x_dense)
+            f += psi_i*basis_function(x)
         return f
 
     def differential_operator(self, order=1):
@@ -212,7 +212,58 @@ class Element(object):
         return dn_dxn
 
 
+class FiniteElements(object):
+    """Convenience class for operations on an even grid of elements"""
+    def __init__(self, N, n_elements, left_boundary, right_boundary):
+        self.N = N
+        self.n_elements = n_elements
+        self.left_boundary = left_boundary
+        self.right_boundary = right_boundary
+        self.boundaries = np.linspace(left_boundary, right_boundary, n_elements+1, endpoint=True)
+        width = self.boundaries[1] - self.boundaries[0]
+        self.elements = []
+        for left, right in zip(self.boundaries, self.boundaries[1:]):
+            element = Element(N, left, right, N, N, width, width)
+            self.elements.append(element)
+
+    def make_vectors(self, f):
+        """Takes a function of space f, and returns a list of arrays
+        containing the coefficients for that function's representation in each
+        element's DVR basis."""
+        vectors = []
+        for element in self.elements:
+            vector = element.make_vector(f)
+            vectors.append(vector)
+        return vectors
+
+    def interpolate_vectors(self, vectors, x):
+        """Takes a list of vectors in the DVR basis of each element and
+        interpolates the spatial function it represents to the points in the
+        array x"""
+        psi_interpolated = np.zeros(len(x))
+        points = []
+        values = []
+        for vector, element in zip(vectors, self.elements):
+            valid = element.valid(x)
+            psi_interpolated[valid] = element.interpolate_vector(vector, x[valid])
+            for i, (point, basis_function) in enumerate(zip(element.points, element.basis)):
+                points.append(point)
+                values.append(vector[i]*basis_function(point))
+        return psi_interpolated, np.array(points), np.array(values)
+
+    def differential_operators(self, order=1):
+        """"Return a list of (self.N x self.N) arrays for the matrix representations of the derivative
+        operators of a given order in the DVR basis of each element."""
+        differential_operators = []
+        for element in self.elements:
+            differential_operator = element.differential_operator(order)
+            differential_operators.append(differential_operator)
+        return differential_operators
+
+
 def gradientn(y, dx, n=1):
+    """Returns the nth derivative of y using repeated applications of
+    np.gradient. Values near the endpoints may be very wrong."""
     result = y
     for i in range(n):
         result = np.gradient(result, dx)
@@ -289,7 +340,7 @@ def test_multiple_elements():
     x = np.linspace(-2,2,100000)
     dx = x[1] - x[0]
     boundaries = np.array([-2,-1,-0.5,-0.25,0,1,2])
-    # boundaries = np.linspace(-2,2,6, endpoint=True)
+    # boundaries = np.linspace(-2,2,7, endpoint=True)
     widths = np.diff(boundaries)
     N = [7,8,9,10,7,6]
     # N = np.zeros(len(widths)) + 7
