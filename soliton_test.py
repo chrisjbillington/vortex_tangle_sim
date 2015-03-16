@@ -24,6 +24,8 @@ rho_max = 2.5e14*1e6                        # Desired max Thomas-Fermi density
 R = 7.5e-6                                  # Desired Thomas-Fermi radius
 N_1D, omega = get_number_and_trap(rho_max, R)  # 1D normalisation constant and harmonic trap frequency
                                                # corresponding to the desired maximum density and radius
+mu = g*rho_max                              # The chemical potential
+
 # Space:
 x_min = -15e-6
 x_max = 15e-6
@@ -41,8 +43,8 @@ f_laplacian = -(kx**2)
 
 
 # Finite elements:
-N = 5
-n_elements = 15
+N = 9
+n_elements = 3
 elements = FiniteElements(N, n_elements, x_min, x_max)
 
 # Second derivative operators:
@@ -87,19 +89,28 @@ def plot(i, t, psi_normal, *psi):
     grad2psi = get_second_derivatives(psi)
     grad2psi_interp, points, values = elements.interpolate_vectors(grad2psi, x)
     modsquaredpsi = get_nonlinear_terms(psi)
+    psi_interp, points, values = elements.interpolate_vectors(psi, x)
+    mod2psi_interp = np.abs(psi_interp)**2
+    mod2values = np.abs(values)**2
     f_psi_normal = pl.fft(psi_normal)
     f_grad2psi = f_laplacian*f_psi_normal
     grad2psi_normal = pl.ifft(f_grad2psi).real
     modsquared_psi_normal = np.abs(psi_normal)**2
 
-    # for element, modsquared_psi_n in zip(elements.elements, modsquaredpsi):
-    #     pl.plot(element.points*1e6, modsquared_psi_n, 'ko')
-    # # pl.plot(points*1e6, values, 'ko')
-    # pl.plot(x*1e6, modsquared_psi_normal, 'k-')
 
-    pl.plot(x*1e6, grad2psi_normal, 'k-')
-    pl.plot(x*1e6, grad2psi_interp, 'r-')
-    pl.plot(points*1e6, values, 'ko')
+    # derivs = dpsi_dt(t, psi_normal, *psi)
+    # time_deriv_normal = derivs[0]
+    # time_deriv = derivs[1:]
+    # time_deriv_interp, points, values = elements.interpolate_vectors(time_deriv, x)
+    # pl.plot(x*1e6, time_deriv_interp, 'r--')
+    # pl.plot(points*1e6, values, 'ko')
+    # pl.plot(x*1e6, time_deriv_normal, 'k-')
+
+    pl.plot(x*1e6, modsquared_psi_normal, 'k-')
+    pl.plot(x*1e6, mod2psi_interp, 'r--')
+    pl.plot(points*1e6, mod2values, 'ko')
+    # for mod2psi_n, element in zip(modsquaredpsi, elements.elements):
+    #     pl.plot(element.points*1e6, mod2psi_n, 'ko')
 
     for boundary in elements.boundaries:
         pl.axvline(boundary*1e6, linestyle='--', color='k')
@@ -141,6 +152,7 @@ def initial():
     psi = elements.make_vectors(initial_guess)
     psi_normal = initial_guess(x)
 
+    global dpsi_dt
     def dpsi_dt(t, psi_normal, *psi):
         """The differential equations for imaginary time evolution"""
 
@@ -150,32 +162,31 @@ def initial():
         d_psi_dt = []
         for psi_n, modsquaredpsi_n, grad2psi_n, element in zip(psi, modsquaredpsi, grad2psi, elements.elements):
             points = element.points
-            d_psi_n_dt = hbar/(2*m)*grad2psi_n - 1/hbar*(V(points) + g*modsquaredpsi_n)*psi_n
+            d_psi_n_dt = hbar/(2*m)*grad2psi_n - 1/hbar*(V(points) + g*modsquaredpsi_n - mu)*psi_n
             # d_psi_n_dt = hbar/(2*m)*grad2psi_n - 1/hbar*(V(points))*psi_n
             d_psi_dt.append(d_psi_n_dt)
         d_psi_dt[0][0] = 0
         d_psi_dt[-1][-1] = 0
 
         # Hop over into Fourier space:
-        # f_psi_normal = pl.fft(psi_normal)
+        f_psi_normal = pl.fft(psi_normal)
 
         # Calculate grad squared of psi there:
-        # f_grad2psi = f_laplacian*f_psi_normal
+        f_grad2psi = f_laplacian*f_psi_normal
 
         # Hop back into real space:
-        # grad2psi_normal = pl.ifft(f_grad2psi).real
+        grad2psi_normal = pl.ifft(f_grad2psi).real
 
         # Calculate dpsi_dt in real space:
-        # d_psi_normal_dt = hbar/(2*m)*grad2psi_normal - 1/hbar*(V(x) + g*np.abs(psi_normal)**2)*psi_normal
+        d_psi_normal_dt = hbar/(2*m)*grad2psi_normal - 1/hbar*(V(x) + g*np.abs(psi_normal)**2 - mu)*psi_normal
         # d_psi_normal_dt = hbar/(2*m)*grad2psi_normal - 1/hbar*(V(x))*psi_normal
-        d_psi_normal_dt = np.zeros(len(x))
+        # d_psi_normal_dt = np.zeros(len(x))
         return [d_psi_normal_dt] + d_psi_dt
-
 
     # Creating a dictionary of triggers that will be called repeatedly
     # during integration. The function output.sample will be called
     # every 50 steps:
-    routines = {1: renormalise, 10000:plot}
+    routines = {1: renormalise, 1000:plot}
 
     # Start the integration:
     euler(dt, t_final, dpsi_dt, [psi_normal] + psi, routines = routines)
