@@ -26,304 +26,169 @@ def gauss_lobatto_points_and_weights(N, left_boundary, right_boundary):
     return points, weights
 
 
-def lobatto_shape_functions(x):
+def lobatto_shape_functions(points):
     """Returns a list of Polynomial objects representing the Lobatto
-    shape functions for the set of points x."""
+    shape functions for a set of Gauss-Lobatto quadrature points."""
     f = []
-    for x_i in x:
-        # The Lobatto shape function corresponding to point x_i is simply a Lagrange
-        # polynomial with zeros at all the other points:
-        other_points = np.array([x_q for x_q in x if x_q != x_i])
-        f_i = Polynomial.fromroots(other_points)/np.prod(x_i - other_points)
+    for point in points:
+        # The Lobatto shape function corresponding to a point is simply the
+        # Lagrange basis polynomial with all the other points as roots:
+        other_points = points[points!=point]
+        f_i = Polynomial.fromroots(other_points)/np.prod(point - other_points)
         f.append(f_i)
     return f
 
 
-class ElementFunction(object):
-    """A callable representing one of the DVR functions within an element (not
-    a bridge function). Evaluates to zero outside the element."""
-    def __init__(self, point, weight, shapefunction, element_left_boundary, element_right_boundary):
-        self.point = point
-        self.polynomial = shapefunction/np.sqrt(weight)
-        self.left_boundary = element_left_boundary
-        self.right_boundary = element_right_boundary
-        self.weight = weight
+class NullFunction(Polynomial):
+    """A Polynomial object that is zero everywhere. Useful as a stand-in for
+    basis functions at the edge of a region when zero boundary conditions are
+    desired"""
+    def __init__(self):
+        Polynomial.__init__(self, [0])
 
-    def __call__(self, arg):
-        """Return the result of the polynomial in [self.element_left_boundary,
-        self.element_right_boundary], and zero outside of it"""
-        result = self.polynomial(arg)
-        valid = (self.left_boundary <= arg) & (arg <= self.right_boundary)
-        if isinstance(arg, np.ndarray):
-            result[~valid] = 0
-        elif not valid:
-            result = 0
-        return result
-
-    def get_projection(self, f):
-        """Return the projection of the function f onto this DVR basis function"""
-        return f(self.point)/self(self.point)
-
-    def derivative(self, arg):
-        result = self.polynomial.deriv()(arg)
-        valid = (self.left_boundary <= arg) & (arg <= self.right_boundary)
-        if isinstance(arg, np.ndarray):
-            result[~valid] = 0
-        elif not valid:
-            result = 0
-        return result
-
-    def second_derivative(self, arg):
-        result = self.polynomial.deriv(2)(arg)
-        valid = (self.left_boundary <= arg) & (arg <= self.right_boundary)
-        if isinstance(arg, np.ndarray):
-            result[~valid] = 0
-        elif not valid:
-            result = 0
-        return result
-
-
-class BridgeFunction(object):
-    """A callable representing a bridge function, one of the DVR functions
-    joining two elements. Evaluates to zero outside the two elements it
-    bridges."""
-    def __init__(self, point, left_weight, right_weight,
-                 left_shapefunction, right_shapefunction,
-                 left_element_left_boundary, right_element_right_boundary):
-        self.point = point
-        self.left_segment = left_shapefunction/np.sqrt(left_weight + right_weight)
-        self.right_segment = right_shapefunction/np.sqrt(left_weight + right_weight)
-        self.left_boundary = left_element_left_boundary
-        self.right_boundary = right_element_right_boundary
-        self.left_weight = left_weight
-        self.right_weight = right_weight
-
-    def __call__(self, arg):
-        left_valid = (self.left_boundary <= arg) & (arg < self.point)
-        right_valid = (arg >= self.point) & (arg <= self.right_boundary)
-        if isinstance(arg, np.ndarray):
-            result = np.zeros(len(arg))
-            result[left_valid] = self.left_segment(arg[left_valid])
-            result[right_valid] = self.right_segment(arg[right_valid])
-        elif left_valid:
-            result = self.left_segment(arg)
-        elif right_valid:
-            result = self.right_segment(arg)
-        else:
-            result = 0
-        return result
-
-    def get_projection(self, f):
-        """Return the projection of the function f onto this DVR basis function"""
-        return f(self.point)/self(self.point)
-
-    def left_derivative(self, arg):
-        return self.left_segment.deriv()(arg)
-
-    def right_derivative(self, arg):
-        return self.right_segment.deriv()(arg)
-
-    def left_second_derivative(self, arg):
-        return self.left_segment.deriv(2)(arg)
-
-    def right_second_derivative(self, arg):
-        return self.right_segment.deriv(2)(arg)
-
-
-class NullFunction(object):
-    """A stand in for an ElementFunction that can be used at the edges of the
-    domain in order to impose zero boundary conditions."""
-    def __call__(self, arg):
-        if isinstance(arg, np.ndarray):
-            return np.zeros(arg.shape)
-        else:
-            return 0
-
-    def derivative(self, arg):
-        return np.zeros_like(arg)
-
-    def second_derivative(self, arg):
-        return np.zeros_like(arg)
-
-    def get_projection(self, f):
-        return 0
+    def deriv(self, order=1):
+        return self
 
 
 class Element(object):
+    """A class for operations with the N-point discrete variable
+    representation basis for Gauss-Lobatto quadrature on an interval
+    [left_boundary, right_boundary]. If this DVR basis is just one element
+    of many finite elements, then N_left and N_right specify how many DVR
+    basis functions the elements to the left and right of this one have,
+    and width_left and width_right specify the widths of those elements.
+    This is important for normalising the basis functions at the edges.
+
+    On each side of an element boundary, each Element has a basis function
+    representing only its own segment of the joining bridge function. In
+    order to construct the total second derivative operator, therefore,
+    the matrix elements produced on either side of the bridge must be
+    summed to produce the total matrix element for the bridge function.
+
+    The first derivative operator has zeros on the diagonal, so no such
+    communication is required to combine first derivative matrix elements
+    either size of a bridge.
+
+    Attributes:
+        N:              number of quadrature points/basis functions
+        left_boundary:  left boundary of element
+        right_boundary: right boundary of element
+        points:         quadrature points
+        weights:        quadrature weights
+        basis:          DVR basis polynomials, valid in in the interval
+                        [left_boundary, right_boundary]. The left and
+                        rightmost basis functions are segments of bridge
+                        functions if there are elements on either size, or
+                        a NullFunction if we are at a boundary (which
+                        imposes zero boundary conditions
+    """
     def __init__(self, N, left_boundary=-1, right_boundary=1,
                  N_left=None, N_right=None, width_left=2, width_right=2):
-        """A class for operations with the N-point discrete variable
-        representation basis for Gauss-Lobatto quadrature on an interval
-        [left_boundary, right_boundary]. If this DVR basis is just one element
-        of many finite elements, then N_left and N_right specify how many DVR
-        basis functions the elements to the left and right of this one have,
-        and width_left and width_right specify the widths of those elements.
-        This is important for making the bridge functions at the edges. On
-        each side of an element boundary, both Elements have a copy of the
-        bridge function, so care must be taken when combining elements
-        together in some way not to double-count them.
-
-        Attributes:
-            N:              number of quadrature points/basis functions
-            left_boundary:  left boundary of interval
-            right_boundary: right boundary of interval
-            points:         quadrature points
-            weights:        quadrature weights
-            basis:          DVR basis polynomials, valid in in the interval
-                            [left_boundary, right_boundary], except for bridge functions
-                            which are valid also over the adjacent element.
-
-        """
         self.N = N
         self.left_boundary = left_boundary
         self.right_boundary = right_boundary
+
+        # Construct our DVR basis functions:
         self.points, self.weights = gauss_lobatto_points_and_weights(N, left_boundary, right_boundary)
-        # Make the DVR basis functions. Start with the Lobatto shape functions:
         shapefunctions = lobatto_shape_functions(self.points)
         self.basis = []
 
-        # First consider the leftmost basis function:
-        if N_left is not None:
-            # Then the leftmost basis function is a bridge function. We need
-            # to know the quadrature points, weights, and shape functions in
-            # the element to the left of us in order to construct the bridge
-            # function:
-            self.left_points, self.left_weights = gauss_lobatto_points_and_weights(
-                                                      N_left, left_boundary - width_left,
-                                                      left_boundary)
-            left_shapefunctions = lobatto_shape_functions(self.left_points)
-            first_basis_function = BridgeFunction(self.points[0],
-                                                  self.left_weights[-1], self.weights[0],
-                                                  left_shapefunctions[-1], shapefunctions[0],
-                                                  left_boundary - width_left, right_boundary)
+        # Is the leftmost basis function a boundary or a bridge?
+        if N_left is None:
+            leftmost_basis_function = NullFunction()
         else:
-            # We use this to impose zero boundary conditions:
-            first_basis_function = NullFunction()
-        self.basis.append(first_basis_function)
+            _, left_weights = gauss_lobatto_points_and_weights(N_left, left_boundary - width_left,
+                                                               left_boundary)
+            leftmost_basis_function = shapefunctions[0]/np.sqrt(left_weights[-1] + self.weights[0])
+        self.basis.append(leftmost_basis_function)
 
         # Now all the internal basis functions:
         for point, weight, shapefunction in zip(self.points, self.weights, shapefunctions)[1:-1]:
-            basis_function = ElementFunction(point, weight, shapefunction, left_boundary, right_boundary)
+            basis_function = shapefunction/np.sqrt(weight)
             self.basis.append(basis_function)
 
-        # Now the rightmost basis function:
-        if N_right is not None:
-            # Then the leftmost basis function is a bridge function. We need
-            # to know the quadrature points, weights, and shape functions in
-            # the element to the right of us in order to construct the bridge
-            # function:
-            self.right_points, self.right_weights = gauss_lobatto_points_and_weights(
-                                                        N_right, right_boundary,
-                                                        right_boundary + width_right)
-            right_shapefunctions = lobatto_shape_functions(self.right_points)
-            last_basis_function = BridgeFunction(self.points[-1],
-                                                 self.weights[-1], self.right_weights[0],
-                                                 shapefunctions[-1], right_shapefunctions[0],
-                                                 left_boundary, right_boundary + width_right)
+        # Is the rightmost basis function a boundary or a bridge?
+        if N_right is None:
+            rightmost_basis_function = NullFunction()
         else:
-            # We use this to impose zero boundary conditions:
-            last_basis_function = NullFunction()
-        self.basis.append(last_basis_function)
+            _, right_weights = gauss_lobatto_points_and_weights(N_right, right_boundary,
+                                                                right_boundary + width_right)
+            rightmost_basis_function = shapefunctions[-1]/np.sqrt(self.weights[-1] + right_weights[0])
+        self.basis.append(rightmost_basis_function)
 
     def valid(self, x):
-        """returns array of bools for which elements of x are within the
-        domain [self.left_boundary, self.right_boundary]"""
-        valid = (self.left_boundary <= x) & (x <= self.right_boundary)
-        return valid
+        """Returns array of bools for whether x is within the element's
+        domain"""
+        return (self.left_boundary <= x) & (x <= self.right_boundary)
 
     def make_vector(self, f):
         """Takes a function of space f, and returns an array containing the
         coefficients for that function's representation in this element's DVR
-        basis."""
+        basis.
+
+        If bridge functions lie at either end of the element, then the
+        coefficient returned for each of them is that of the whole bridge
+        function, not just our element's segment. So no summing or anything is
+        required across bridges; to within rounding error, make_vector()
+        called on two adjacent elements will return the same coefficient for
+        the point joining them.
+
+        Coefficients are defined to be zero at the boundary of the problem.
+        For sensible results, f should be zero there too."""
         psi = np.zeros(self.N)
-        for i, basis_function in enumerate(self.basis):
-            psi[i] = basis_function.get_projection(f)
+        for i, (point, basis_function) in enumerate(zip(self.points, self.basis)):
+            if not isinstance(basis_function, NullFunction):
+                psi[i] = f(point)/basis_function(point)
         return psi
 
     def interpolate_vector(self, psi, x):
         """Takes a vector psi in the DVR basis and interpolates the spatial
-        function it represents to the points in the array x"""
+        function it represents to the points in the array x.
+
+        x may be larger than the domain of this element; the returned array
+        will contain zeros at points outside the element."""
         f = np.zeros(len(x))
+        valid = self.valid(x)
         for i, (psi_i, basis_function) in enumerate(zip(psi, self.basis)):
-            f += psi_i*basis_function(x)
+            f[valid] += psi_i*basis_function(x[valid])
         return f
 
     def derivative_operator(self):
         """"Return a (self.N x self.N) array for the matrix representation of
-        the derivative operator in the DVR basis."""
+        the derivative operator in the DVR basis.
+
+        Its diagonals are zero, and so the first and last diagonals can be
+        considered to be the matrix elements for the total bridge function, if
+        any, with no communication between elements required. """
         d_dx = np.zeros((self.N,self.N))
         for i, (x_i, w_i, u_i) in enumerate(zip(self.points, self.weights, self.basis)):
             for j, u_j in enumerate(self.basis):
                 if i == j:
-                    # Diagonals of derivative operator are zero, including bridge functions:
+                    # Diagonals of derivative operator are zero:
                     d_dx[i, j] = 0
-                    continue
-                if isinstance(u_j, BridgeFunction):
-                    # We only need the interior segments of the bridge
-                    # functions to evaluate the matrix element of non bridge
-                    # functions with them:
-                    if j == 0:
-                        # It's a bridge function on the left of the element.
-                        # Only its right segment is interior to the element:
-                        du_j_dx = u_j.right_derivative
-                    elif j == self.N-1:
-                        # It's a bridge function on the right of the element.
-                        # Only its left segment is interior to the element:
-                        du_j_dx = u_j.left_derivative
                 else:
-                    # Not a bridge function:
-                    du_j_dx = u_j.derivative
-                # Evaluate the matrix element using the quadrature rule; the
-                # sum for which has only one nonzero term:
-                d_dx[i, j] = w_i * u_i(x_i) * du_j_dx(x_i)
+                    # Evaluate the matrix element using the quadrature rule;
+                    # the sum for which has only one nonzero term:
+                    d_dx[i, j] = w_i * u_i(x_i) * u_j.deriv()(x_i)
         return d_dx
 
     def second_derivative_operator(self):
         """"Return a (self.N x self.N) array for the matrix representation of
-        the second derivative operator in the DVR basis."""
+        the second derivative operator in the DVR basis.
+
+        The first and last diagonals correspond to the matrix elements for
+        only our element's segment of any the bridge functions, and so must be
+        summed with the matrix element for the other segment in order to
+        obtain the total second derivative matrix element for the bridge
+        function. In actual implementation, more likely one will sum them and
+        then divide by two, in order to have half of the kinetic energy
+        operator operate in each element"""
         d2_dx2 = np.zeros((self.N,self.N))
-        for i, (x_i, w_i, u_i) in enumerate(zip(self.points, self.weights, self.basis)):
+        for i, u_i in enumerate(self.basis):
             for j, u_j in enumerate(self.basis):
-                if i == j and isinstance(u_i, BridgeFunction):
-                    # For the matrix element of a bridge function with itself,
-                    # we need to integrate over this element as well as either
-                    # the corresponding adjecent element:
-                    if i == 0:
-                        left_segment_points = self.left_points
-                        left_segment_weights = self.left_weights
-                        right_segment_points = self.points
-                        right_segment_weights = self.weights
-                    else:
-                        left_segment_points = self.points
-                        left_segment_weights = self.weights
-                        right_segment_points = self.right_points
-                        right_segment_weights = self.right_weights
-                    # Integrate over the two elements using the quadrature rule:
-                    for point, weight in zip(left_segment_points, left_segment_weights):
-                        d2_dx2[i, j] += - 0.5 * weight * u_i.left_derivative(point)**2
-                    for point, weight in zip(right_segment_points, right_segment_weights):
-                        d2_dx2[i, j] += - 0.5 * weight * u_i.right_derivative(point)**2
-                else:
-                    # Otherwise we only need to integrate over a single element.
-                    # In this case we need to use only the interior segments of any
-                    # bridge functions:
-                    if isinstance(u_i, BridgeFunction):
-                        if i == 0:
-                            du_i_dx = u_i.right_derivative
-                        elif i == self.N-1:
-                            du_i_dx = u_i.left_derivative
-                    else:
-                        du_i_dx = u_i.derivative
-                    if isinstance(u_j, BridgeFunction):
-                        if j == 0:
-                            du_j_dx = u_j.right_derivative
-                        elif j == self.N-1:
-                            du_j_dx = u_j.left_derivative
-                    else:
-                        du_j_dx = u_j.derivative
-                    # Evaluate the matrix element using the quadrature rule:
-                    for point, weight in zip(self.points, self.weights):
-                        d2_dx2[i, j] += - weight * du_i_dx(point) * du_j_dx(point)
+                # Evaluate the matrix element using the quadrature rule:
+                for point, weight in zip(self.points, self.weights):
+                    d2_dx2[i, j] += - weight * u_i.deriv()(point) * u_j.deriv()(point)
         return d2_dx2
 
 
