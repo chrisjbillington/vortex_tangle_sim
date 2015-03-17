@@ -188,10 +188,12 @@ class Element(object):
             # to know the quadrature points, weights, and shape functions in
             # the element to the left of us in order to construct the bridge
             # function:
-            left_points, left_weights = gauss_lobatto_points_and_weights(
-                                            N_left, left_boundary - width_left, left_boundary)
-            left_shapefunctions = lobatto_shape_functions(left_points)
-            first_basis_function = BridgeFunction(self.points[0], left_weights[-1], self.weights[0],
+            self.left_points, self.left_weights = gauss_lobatto_points_and_weights(
+                                                      N_left, left_boundary - width_left,
+                                                      left_boundary)
+            left_shapefunctions = lobatto_shape_functions(self.left_points)
+            first_basis_function = BridgeFunction(self.points[0],
+                                                  self.left_weights[-1], self.weights[0],
                                                   left_shapefunctions[-1], shapefunctions[0],
                                                   left_boundary - width_left, right_boundary)
         else:
@@ -210,10 +212,12 @@ class Element(object):
             # to know the quadrature points, weights, and shape functions in
             # the element to the right of us in order to construct the bridge
             # function:
-            right_points, right_weights = gauss_lobatto_points_and_weights(
-                                              N_right, right_boundary, right_boundary + width_right)
-            right_shapefunctions = lobatto_shape_functions(right_points)
-            last_basis_function = BridgeFunction(self.points[-1], self.weights[-1], right_weights[0],
+            self.right_points, self.right_weights = gauss_lobatto_points_and_weights(
+                                                        N_right, right_boundary,
+                                                        right_boundary + width_right)
+            right_shapefunctions = lobatto_shape_functions(self.right_points)
+            last_basis_function = BridgeFunction(self.points[-1],
+                                                 self.weights[-1], self.right_weights[0],
                                                  shapefunctions[-1], right_shapefunctions[0],
                                                  left_boundary, right_boundary + width_right)
         else:
@@ -276,46 +280,50 @@ class Element(object):
 
     def second_derivative_operator(self):
         """"Return a (self.N x self.N) array for the matrix representation of
-        the derivative operator in the DVR basis."""
+        the second derivative operator in the DVR basis."""
         d2_dx2 = np.zeros((self.N,self.N))
         for i, (x_i, w_i, u_i) in enumerate(zip(self.points, self.weights, self.basis)):
             for j, u_j in enumerate(self.basis):
                 if i == j and isinstance(u_i, BridgeFunction):
-                    # Matrix element of a bridge function with itself is the
-                    # sum of the matrix elements of each segment with itself,
-                    # evaluated with the quadrature rules on either side of
-                    # the boundary (possibly having different weights), plus a
-                    # finite contribution due to the discontinuous first
-                    # derivative across the boundary. The integral of the
-                    # derivative of a step function must give back the step
-                    # function, so we find that the integral of the second
-                    # derivative across the boundary is simply equal to the
-                    # size of the discontinuous jump in the first derivative
-                    # at that point. If you like you can think of the second
-                    # derivative having a dirac delta at the boundary.
-
-                    d2_dx2[i, j] = (u_i.left_weight * u_i(x_i) * u_i.left_second_derivative(x_i) +
-                                    u_i.right_weight * u_i(x_i) * u_i.right_second_derivative(x_i) +
-                                    u_i.right_derivative(x_i) - u_i.left_derivative(x_i))
-                    continue
-                if isinstance(u_j, BridgeFunction):
-                    # We only need the interior segments of the bridge
-                    # functions to evaluate the matrix element of non bridge
-                    # functions with them:
-                    if j == 0:
-                        # It's a bridge function on the left of the element.
-                        # Only its right segment is interior to the element:
-                        d2u_j_dx2 = u_j.right_second_derivative
-                    elif j == self.N-1:
-                        # It's a bridge function on the right of the element.
-                        # Only its left segment is interior to the element:
-                        d2u_j_dx2 = u_j.left_second_derivative
+                    # For the matrix element of a bridge function with itself,
+                    # we need to integrate over this element as well as either
+                    # the corresponding adjecent element:
+                    if i == 0:
+                        left_segment_points = self.left_points
+                        left_segment_weights = self.left_weights
+                        right_segment_points = self.points
+                        right_segment_weights = self.weights
+                    else:
+                        left_segment_points = self.points
+                        left_segment_weights = self.weights
+                        right_segment_points = self.right_points
+                        right_segment_weights = self.right_weights
+                    # Integrate over the two elements using the quadrature rule:
+                    for point, weight in zip(left_segment_points, left_segment_weights):
+                        d2_dx2[i, j] += - 0.5 * weight * u_i.left_derivative(point)**2
+                    for point, weight in zip(right_segment_points, right_segment_weights):
+                        d2_dx2[i, j] += - 0.5 * weight * u_i.right_derivative(point)**2
                 else:
-                    # Not a bridge function:
-                    d2u_j_dx2 = u_j.second_derivative
-                # Evaluate the matrix element using the quadrature rule; the
-                # sum for which has only one nonzero term:
-                d2_dx2[i, j] = w_i * u_i(x_i) * d2u_j_dx2(x_i)
+                    # Otherwise we only need to integrate over a single element.
+                    # In this case we need to use only the interior segments of any
+                    # bridge functions:
+                    if isinstance(u_i, BridgeFunction):
+                        if i == 0:
+                            du_i_dx = u_i.right_derivative
+                        elif i == self.N-1:
+                            du_i_dx = u_i.left_derivative
+                    else:
+                        du_i_dx = u_i.derivative
+                    if isinstance(u_j, BridgeFunction):
+                        if j == 0:
+                            du_j_dx = u_j.right_derivative
+                        elif j == self.N-1:
+                            du_j_dx = u_j.left_derivative
+                    else:
+                        du_j_dx = u_j.derivative
+                    # Evaluate the matrix element using the quadrature rule:
+                    for point, weight in zip(self.points, self.weights):
+                        d2_dx2[i, j] += - weight * du_i_dx(point) * du_j_dx(point)
         return d2_dx2
 
 
@@ -360,14 +368,25 @@ class FiniteElements(object):
                 values.append(vector[i]*basis_function(point))
         return psi_interpolated, np.array(points), np.array(values)
 
-    def differential_operators(self, order=1):
-        """"Return a list of (self.N x self.N) arrays for the matrix representations of the derivative
-        operators of a given order in the DVR basis of each element."""
-        differential_operators = []
+    def derivative_operators(self):
+        """"Return a list of (self.N x self.N) arrays for the matrix
+        representations of the derivative operators of a given order in
+        the DVR basis of each element."""
+        operators = []
         for element in self.elements:
-            differential_operator = element.differential_operator(order)
-            differential_operators.append(differential_operator)
-        return differential_operators
+            operator = element.derivative_operator()
+            operators.append(operator)
+        return operators
+
+    def second_derivative_operators(self):
+        """"Return a list of (self.N x self.N) arrays for the matrix
+        representations of the second derivative operators of a given order in
+        the DVR basis of each element."""
+        operators = []
+        for element in self.elements:
+            operator = element.second_derivative_operator()
+            operators.append(operator)
+        return operators
 
 
 def gradientn(y, dx, n=1):
@@ -577,15 +596,20 @@ def test_multiple_elements():
     ylim(-10, 4)
 
 
-def test_second_derivative():
+def test_derivative(order=1, equal=True):
+    figure()
     # A dense grid for making plots
     x = np.linspace(-2,2,100000)
     dx = x[1] - x[0]
-    # boundaries = np.array([-2,-1,-0.5,-0.25,0,1,2])
-    boundaries = np.linspace(-2,2,7, endpoint=True)
+    if equal:
+        boundaries = np.linspace(-2, 2, 12)
+    else:
+        boundaries = np.array([-2,-1,-0.5,-0.25,0,1,2])
     widths = np.diff(boundaries)
-    # N = [7,8,9,10,7,6]
-    N = np.zeros(len(widths)) + 7
+    if equal:
+        N = np.zeros(len(widths)) + 7
+    else:
+        N = [7,8,9,10,12,6]
     n_elements = len(boundaries) - 1
 
     elements = []
@@ -606,12 +630,14 @@ def test_second_derivative():
     psi = [e.make_vector(f) for e in elements]
 
     # The exact derivative of the wavefunction:
-    # d_psi_dense_dx = gradientn(psi_dense, dx, 1)
-    d_psi_dense_dx = gradientn(psi_dense, dx, 2)
+    d_psi_dense_dx = gradientn(psi_dense, dx, order)
 
     # Plot the derivative of the wavefunction using the total derivative operator:
     subplot(121)
-    title('Total derivative operator')
+    if order == 1:
+        title('First derivative operator')
+    else:
+        title('Second derivative operator')
 
     # Lets construct the overall derivative operator:
     total_N = sum(N) - n_elements + 1
@@ -622,9 +648,12 @@ def test_second_derivative():
     start_index = 0
     for i, element in enumerate(elements):
         dn_dxn = element.derivative_operator()
-        dn_dxn = element.second_derivative_operator()
+        if order == 2:
+            dn_dxn = element.second_derivative_operator()
+        else:
+            dn_dxn = element.derivative_operator()
         end_index = start_index + N[i]
-        D_total[start_index:end_index, start_index:end_index] = dn_dxn
+        D_total[start_index:end_index, start_index:end_index] += dn_dxn
         psi_total[start_index:end_index] = psi[i]
         for j, (point, basis_function) in enumerate(zip(element.points, element.basis)):
             weights[start_index+j] = basis_function(point)
@@ -642,8 +671,10 @@ def test_second_derivative():
     pl.colorbar()
 
     subplot(122)
-    # clf()
-    title('Exact and FEDVR derivative with total operator')
+    if order == 1:
+        title('Exact and FEDVR first derivative')
+    else:
+        title('Exact and FEDVR second derivative')
     plot(x, d_psi_dense_dx, 'k-')
     d_psi_total_dx = np.dot(D_total, psi_total)
     plot(points, weights*d_psi_total_dx, 'ko')
@@ -651,13 +682,11 @@ def test_second_derivative():
         axvline(boundary, linestyle='--', color='k')
     grid(True)
     ylim(-10,4)
-    return D_total
-
 
 
 if __name__ == '__main__':
     # test_single_element()
     # test_multiple_elements()
-    # show()
-    test_second_derivative()
+    test_derivative(order=1)
+    test_derivative(order=2)
     show()

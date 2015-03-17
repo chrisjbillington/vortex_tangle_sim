@@ -43,12 +43,12 @@ f_laplacian = -(kx**2)
 
 
 # Finite elements:
-N = 9
-n_elements = 3
+N = 4
+n_elements = 50
 elements = FiniteElements(N, n_elements, x_min, x_max)
 
 # Second derivative operators:
-grad2 = elements.differential_operators(2)
+grad2 = elements.second_derivative_operators()
 
 
 def V(x):
@@ -87,7 +87,7 @@ def plot(i, t, psi_normal, *psi):
     #     pl.plot(points*1e6, np.abs(values)**2, 'ko')
 
     grad2psi = get_second_derivatives(psi)
-    grad2psi_interp, points, values = elements.interpolate_vectors(grad2psi, x)
+    grad2psi_interp, points, grad2values = elements.interpolate_vectors(grad2psi, x)
     modsquaredpsi = get_nonlinear_terms(psi)
     psi_interp, points, values = elements.interpolate_vectors(psi, x)
     mod2psi_interp = np.abs(psi_interp)**2
@@ -109,12 +109,18 @@ def plot(i, t, psi_normal, *psi):
     pl.plot(x*1e6, modsquared_psi_normal, 'k-')
     pl.plot(x*1e6, mod2psi_interp, 'r--')
     pl.plot(points*1e6, mod2values, 'ko')
+
+    # pl.plot(x*1e6, grad2psi_normal, 'k-')
+    # pl.plot(x*1e6, grad2psi_interp, 'r--')
+    # pl.plot(points*1e6, grad2values, 'ko')
+
     # for mod2psi_n, element in zip(modsquaredpsi, elements.elements):
     #     pl.plot(element.points*1e6, mod2psi_n, 'ko')
 
     for boundary in elements.boundaries:
         pl.axvline(boundary*1e6, linestyle='--', color='k')
     pl.grid(True)
+    pl.axis([-1.0, 1, 0, 2.6e20])
     pl.savefig('output.png')
     # pl.show()
     pl.clf()
@@ -125,18 +131,22 @@ def renormalise(i, t, psi_normal, *psi):
         ncalc = 0
         for psi_n in psi:
             ncalc += np.dot(psi_n[:-1].conj().T, psi_n[:-1])
-        for psi_n in psi:
+        for psi_n, element in zip(psi, elements.elements):
+            points = element.points
             psi_n[:] *= np.sqrt(N_1D/ncalc.real)
-        psi[0][0] = 0
-        psi[-1][-1] = 0
+            psi_n[points >= 0] = np.abs(psi_n[points >= 0])
+            psi_n[points < 0] = -np.abs(psi_n[points < 0])
+            psi_n[points == 0] = 0
     ncalc_normal = (np.abs(psi_normal)**2).sum()*dx
     psi_normal[:] = np.abs(psi_normal)*np.sqrt(N_1D/ncalc_normal.real)
+    psi_normal[x >= 0] = np.abs(psi_normal[x >= 0])
+    psi_normal[x < 0] = -np.abs(psi_normal[x < 0])
 
 
 def initial():
     """Imaginary time evolution for the initial state"""
 
-    dt = 2e-8
+    dt = 2e-7
     t_final = 30e-3
 
     # The initial guess:
@@ -165,8 +175,6 @@ def initial():
             d_psi_n_dt = hbar/(2*m)*grad2psi_n - 1/hbar*(V(points) + g*modsquaredpsi_n - mu)*psi_n
             # d_psi_n_dt = hbar/(2*m)*grad2psi_n - 1/hbar*(V(points))*psi_n
             d_psi_dt.append(d_psi_n_dt)
-        d_psi_dt[0][0] = 0
-        d_psi_dt[-1][-1] = 0
 
         # Hop over into Fourier space:
         f_psi_normal = pl.fft(psi_normal)
@@ -186,7 +194,7 @@ def initial():
     # Creating a dictionary of triggers that will be called repeatedly
     # during integration. The function output.sample will be called
     # every 50 steps:
-    routines = {1: renormalise, 1000:plot}
+    routines = {1: renormalise, 2000:plot}
 
     # Start the integration:
     euler(dt, t_final, dpsi_dt, [psi_normal] + psi, routines = routines)
