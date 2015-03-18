@@ -138,7 +138,7 @@ class Element(object):
 
         Coefficients are defined to be zero at the boundary of the problem.
         For sensible results, f should be zero there too."""
-        psi = np.zeros(self.N)
+        psi = np.zeros(self.N, dtype=complex)
         for i, (point, basis_function) in enumerate(zip(self.points, self.basis)):
             if not isinstance(basis_function, NullFunction):
                 psi[i] = f(point)/basis_function(point)
@@ -150,7 +150,7 @@ class Element(object):
 
         x may be larger than the domain of this element; the returned array
         will contain zeros at points outside the element's domain."""
-        f = np.zeros(len(x))
+        f = np.zeros(len(x), dtype=complex)
         valid = self.valid(x)
         for i, (psi_i, basis_function) in enumerate(zip(psi, self.basis)):
             f[valid] += psi_i*basis_function(x[valid])
@@ -269,26 +269,27 @@ class FiniteElements1D(object):
         right_operator = self.right_element.second_derivative_operator()
         return left_operator, internal_operator, right_operator
 
-    def make_vectors(self, f):
+    def make_vector(self, f):
         """Takes a function of space f, and returns a (self.n_elements x
         self.N) array containing the coefficients for that function's
         representation in the DVR basis in each element.
 
         Coefficients are defined to be zero at the boundary of the problem.
         For sensible results, f should be zero there too."""
-        psi = f(self.points)/self.values
+        psi = np.zeros(self.points.shape, dtype=complex)
+        psi[:] = f(self.points)/self.values
         # Boundary conditions:
-        psi[0] = psi[-1] = 0
+        psi[0,0] = psi[-1,-1] = 0
         return psi
 
-    def interpolate_vectors(self, psi, npts):
-        """Takes a (self.n_elements x self.N) array psi of DVR vectors in the
-        DVR basis and interpolates the spatial function it represents to npts
-        equally spaced points per element. Returns an array of the x points used
-        and the values at those points."""
+    def interpolate_vector(self, psi, npts):
+        """Takes a (self.n_elements x self.N) array psi of coefficients in the
+        FEDVR basis and interpolates the spatial function it represents to
+        npts equally spaced points per element. Returns an array of the x
+        points used and the values at those points."""
         # The array of points within an element:
         x = np.linspace(0, self.element_width, npts, endpoint=False)
-        f = np.zeros((self.n_elements, npts))
+        f = np.zeros((self.n_elements, npts), dtype=complex)
         for i, basis_function in enumerate(self.element.basis):
             f += psi[:, i, np.newaxis]*basis_function(x)
 
@@ -311,13 +312,12 @@ class FiniteElements1D(object):
 
 if __name__ == '__main__':
 
-    USE_ALTERNATE_ALGORITHM = True
     # Space:
     x_min = -15e-6
     x_max = 15e-6
 
     # Finite elements:
-    N = 18
+    N = 7
     n_elements = 10
 
     elements = FiniteElements1D(N, n_elements, x_min, x_max)
@@ -326,14 +326,14 @@ if __name__ == '__main__':
         sigma = 3e-6
         return np.exp(-x**2/(2*sigma**2))
 
-    psi = elements.make_vectors(f)
-    x_interp, psi_interp = elements.interpolate_vectors(psi, 10000)
+    psi = elements.make_vector(f)
+    x_interp, psi_interp = elements.interpolate_vector(psi, 10000)
     points, psi_values = elements.get_values(psi)
     x = np.linspace(x_min, x_max, 10000)
     psi_exact = f(x)
     pl.plot(x*1e6, psi_exact, 'k-')
-    pl.plot(x_interp*1e6, psi_interp, 'r--')
-    pl.plot(points*1e6, psi_values, 'ko')
+    pl.plot(x_interp*1e6, psi_interp.real, 'r--')
+    pl.plot(points*1e6, psi_values.real, 'ko')
     pl.grid(True)
     for edge in elements.element_edges:
         pl.axvline(edge*1e6, linestyle='--', color='k')

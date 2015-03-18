@@ -1,9 +1,10 @@
-from __future__ import division
+from __future__ import division, print_function
 import numpy as np
 import pylab as pl
+from scipy.linalg import expm
+from FEDVR import FiniteElements1D
 
-from integrator import euler, rk4, HDFOutput
-from FEDVR import FiniteElements
+
 def get_number_and_trap(rho_max, R):
     """Return the 1D normalisation constant N (units of atoms per unit area)
     and harmonic trap frequency omega that correspond to the Thomas-Fermi
@@ -30,182 +31,145 @@ mu = g*rho_max                              # The chemical potential
 x_min = -15e-6
 x_max = 15e-6
 
-# Dense grid for plotting:
-x = np.linspace(x_min, x_max, 1024)
-
-dx = x[1]-x[0]
-
-# Fourier space:
-kx = 2*pi*pl.fftfreq(len(x),d=dx)
-
-# Laplace operator in Fourier space:
-f_laplacian = -(kx**2)
-
-
 # Finite elements:
 N = 7
 n_elements = 10
+assert not (n_elements % 2) # Algorithm below relies on last element being odd numbered
+elements = FiniteElements1D(N, n_elements, x_min, x_max)
 
-element_width = (x_max - x_min)/n_elements
-element_boundaries = np.lispace(x_min, x_max, n_elements + 1)
+# Which elements are odd numbered, and which are even?
+element_numbers = np.array(range(n_elements))
+even = (element_numbers % 2) == 0
+odd = ~even
+# Which are internal, which are on boundaries?
+internal = (0 < element_numbers) & (element_numbers < N-1)
+odd_internal = odd & internal
+even_internal = even & internal
 
-# A single element we will use to represent all elements, since they are
-# identical. We instantiate it with the domain [0, element_width] and
-# interpret its points as being relative to the left side of the specific
-# element we're dealing with at any time.
-elements = FiniteElements(N, n_elements, x_min, x_max)
+# Second derivative operators, each is an (N x N) array. Different at the left
+# and right boundary elements in order to impose zero boundary conditions:
+grad2_left, grad2, grad2_right = elements.second_derivative_operators()
 
-# Second derivative operators:
-grad2 = elements.second_derivative_operators()
+# Density operator. Is diagonal and so is represented as a length N array
+# containing its diagonals:
+density_operator = elements.density_operator()
 
+# The same except with half the weight at the edges so that we don't double
+# count edges when we sum over all elements:
+norm_operator = elements.density_operator(halved_at_edges=True)
 
-def V(x):
-    """The harmonic trap"""
-    return 0.5*m*omega**2*x**2
+# The spatial points of the DVR basis functions, an (n_elements x N) array
+x = elements.points
 
+# The Harmonic trap at our gridpoints, (n_elements x N):
+V = 0.5*m*omega**2*x**2
 
-def get_second_derivatives(psi):
-    # Get the second derivatives of the vectors:
-    grad2psi = []
-    for psi_n, grad2_n in zip(psi, grad2):
-        grad2psi_n = np.dot(grad2_n, psi_n)
-        grad2psi.append(grad2psi_n)
-    # Exchange at the edges:
-    for left_vector, right_vector in zip(grad2psi, grad2psi[1:]):
-        left_vector[-1] = right_vector[0] = left_vector[-1] + right_vector[0]
-    return grad2psi
-
-
-def get_nonlinear_terms(psi):
-    modsquaredpsi = []
-    for element, psi_n in zip(elements.elements, psi):
-        modsquaredpsi_n = np.zeros(N)
-        for i, (point, basis_function) in enumerate(zip(element.points, element.basis)):
-            value = psi_n[i]*basis_function(point)
-            modsquaredpsi_n[i] = np.abs(value)**2
-        modsquaredpsi.append(modsquaredpsi_n)
-    return modsquaredpsi
-
-
-def plot(i, t, psi_normal, *psi):
-    # pl.plot(x*1e6, np.abs(psi_normal)**2, 'k-')
-    # if psi:
-    #     psi_interp, points, values = elements.interpolate_vectors(psi, x)
-    #     pl.plot(x*1e6, np.abs(psi_interp)**2, 'r--')
-    #     pl.plot(points*1e6, np.abs(values)**2, 'ko')
-
-    grad2psi = get_second_derivatives(psi)
-    grad2psi_interp, points, grad2values = elements.interpolate_vectors(grad2psi, x)
-    modsquaredpsi = get_nonlinear_terms(psi)
-    psi_interp, points, values = elements.interpolate_vectors(psi, x)
-    mod2psi_interp = np.abs(psi_interp)**2
-    mod2values = np.abs(values)**2
-    f_psi_normal = pl.fft(psi_normal)
-    f_grad2psi = f_laplacian*f_psi_normal
-    grad2psi_normal = pl.ifft(f_grad2psi).real
-    modsquared_psi_normal = np.abs(psi_normal)**2
-
-
-    # derivs = dpsi_dt(t, psi_normal, *psi)
-    # time_deriv_normal = derivs[0]
-    # time_deriv = derivs[1:]
-    # time_deriv_interp, points, values = elements.interpolate_vectors(time_deriv, x)
-    # pl.plot(x*1e6, time_deriv_interp, 'r--')
-    # pl.plot(points*1e6, values, 'ko')
-    # pl.plot(x*1e6, time_deriv_normal, 'k-')
-
-    pl.plot(x*1e6, modsquared_psi_normal, 'k-')
-    pl.plot(x*1e6, mod2psi_interp, 'r--')
-    pl.plot(points*1e6, mod2values, 'ko')
-
-    # pl.plot(x*1e6, grad2psi_normal, 'k-')
-    # pl.plot(x*1e6, grad2psi_interp, 'r--')
-    # pl.plot(points*1e6, grad2values, 'ko')
-
-    # for mod2psi_n, element in zip(modsquaredpsi, elements.elements):
-    #     pl.plot(element.points*1e6, mod2psi_n, 'ko')
-
-    for boundary in elements.boundaries:
-        pl.axvline(boundary*1e6, linestyle='--', color='k')
-    pl.grid(True)
-    pl.axis([-1.0, 1, 0, 2.6e20])
-    pl.savefig('output.png')
-    # pl.show()
-    pl.clf()
-
-def renormalise(i, t, psi_normal, *psi):
-    # imposing normalisation on the total wavefunction:
-    if psi:
-        ncalc = 0
-        for psi_n in psi:
-            ncalc += np.dot(psi_n[:-1].conj().T, psi_n[:-1])
-        for psi_n, element in zip(psi, elements.elements):
-            points = element.points
-            psi_n[:] *= np.sqrt(N_1D/ncalc.real)
-            psi_n[points >= 0] = np.abs(psi_n[points >= 0])
-            psi_n[points < 0] = -np.abs(psi_n[points < 0])
-            psi_n[points == 0] = 0
-    ncalc_normal = (np.abs(psi_normal)**2).sum()*dx
-    psi_normal[:] = np.abs(psi_normal)*np.sqrt(N_1D/ncalc_normal.real)
-    psi_normal[x >= 0] = np.abs(psi_normal[x >= 0])
-    psi_normal[x < 0] = -np.abs(psi_normal[x < 0])
-
+def plot(*args):
+    pass
 
 def initial():
-    """Imaginary time evolution for the initial state"""
-
     dt = 2e-7
     t_final = 30e-3
 
+    # The potential energy evolution operator for half a timestep in imaginary
+    # time, (n_elements x N). It is a diagonal operator, so the below array is
+    # just the diagonals and is applied by multiplying psi elementwise:
+    U_V_halfstep = np.exp(-1/hbar * V * dt/2)
+
+    # The kinetic energy evolution oparators for half a timestep in imaginary
+    # time, each is (N x N). Not diagonal, but the same in each element. We
+    # need different operators for the first and last elements in order to
+    # impose boundary conditions
+    U_K_left_halfstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2_left) * dt/2)
+    U_K_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2) * dt/2)
+    U_K_right_halfstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2_right) * dt/2)
+    # The same as above but for a full timestep:
+    U_K_left_fullstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2_left) * dt)
+    U_K_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2) * dt)
+    U_K_right_fullstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2_right) * dt)
+
+    def renormalise(psi):
+        # imposing normalisation on the wavefunction:
+        ncalc = (psi.conj()*norm_operator*psi).sum()
+        psi[:] *= np.sqrt(N_1D/ncalc.real)
+
     # The initial guess:
     def initial_guess(x):
-        # Thomas-Fermi distribution with a phase jump in the middle
-        # psi = rho_max*(1 - x**2/R**2)
-        # psi = np.clip(psi, 0, None)
-        # psi = np.sqrt(psi)
-        # # psi *= (x<0) - 1*(x>=0)
-        return np.exp(-x**2/(0.25*R**2))
-        # return psi
+        sigma = 0.5*R
+        return N_1D/np.sqrt(2*pi*sigma**2)*np.exp(-x**2/(2*sigma**2))
 
-    psi = elements.make_vectors(initial_guess)
-    psi_normal = initial_guess(x)
-
-    global dpsi_dt
-    def dpsi_dt(t, psi_normal, *psi):
-        """The differential equations for imaginary time evolution"""
-
-        grad2psi = get_second_derivatives(psi)
-        modsquaredpsi = get_nonlinear_terms(psi)
-
-        d_psi_dt = []
-        for psi_n, modsquaredpsi_n, grad2psi_n, element in zip(psi, modsquaredpsi, grad2psi, elements.elements):
-            points = element.points
-            d_psi_n_dt = hbar/(2*m)*grad2psi_n - 1/hbar*(V(points) + g*modsquaredpsi_n - mu)*psi_n
-            # d_psi_n_dt = hbar/(2*m)*grad2psi_n - 1/hbar*(V(points))*psi_n
-            d_psi_dt.append(d_psi_n_dt)
-
-        # Hop over into Fourier space:
-        f_psi_normal = pl.fft(psi_normal)
-
-        # Calculate grad squared of psi there:
-        f_grad2psi = f_laplacian*f_psi_normal
-
-        # Hop back into real space:
-        grad2psi_normal = pl.ifft(f_grad2psi).real
-
-        # Calculate dpsi_dt in real space:
-        d_psi_normal_dt = hbar/(2*m)*grad2psi_normal - 1/hbar*(V(x) + g*np.abs(psi_normal)**2 - mu)*psi_normal
-        # d_psi_normal_dt = hbar/(2*m)*grad2psi_normal - 1/hbar*(V(x))*psi_normal
-        # d_psi_normal_dt = np.zeros(len(x))
-        return [d_psi_normal_dt] + d_psi_dt
+    psi = elements.make_vector(initial_guess)
+    renormalise(psi)
 
     # Creating a dictionary of triggers that will be called repeatedly
     # during integration. The function output.sample will be called
     # every 50 steps:
     routines = {1: renormalise, 2000:plot}
 
-    # Start the integration:
-    euler(dt, t_final, dpsi_dt, [psi_normal] + psi, routines = routines)
+    # The nonlinear evolution operator for the first half timestep in
+    # imaginary time. It is always the same as the end of timesteps, so other
+    # than this first timestep we just re-use it from then
+    density = psi.conj()*density_operator*psi
+    U_nonlinear_halfstep = np.exp(-1/hbar * g * density * dt/2)
+
+    i = 0
+    t = 0
+    while t < t_final:
+        # Evolve for half a step with nonlinear and potential:
+        psi = U_V_halfstep*U_nonlinear_halfstep*psi
+
+        # Evolve odd elements for half a step with kinetic
+        try:
+            psi[odd_internal] = np.einsum('ij,jn->in', U_K_halfstep, psi[odd_internal])
+        except:
+            import IPython
+            IPython.embed()
+        psi[-1] = np.einsum('ij,jn->in', U_K_right_halfstep, psi[-1])
+
+        # Copy odd endpoints -> adjacent even endpoints
+
+        # Evolve even elements for a full step with kinetic
+
+        # Copy even elements -> adjacent odd endpoints
+
+        # Evolve odd elements for half a step with kinetic
+
+        # Renormalise
+
+        # if last step or outputting this step:
+            # Calculate nonlinear evolution operator for half a step
+
+            # Evolve for half a step with nonlinear and potential
+
+            # Renormalise
+
+        # else:
+            # Calculate nonlinear evolution operator for full step
+
+            # Evolve for a full step with nonlinear and potential
+
+def evolution():
+    dt = 2e-7
+    t_final = 30e-3
+
+    # The potential energy unitary evolution operator for half a timestep,
+    # (n_elements x N). It is a diagonal operator, so the below array is just the
+    # diagonals and is applied by multiplying psi elementwise:
+    U_V_halfstep = np.exp(-1j/hbar * V * dt/2)
+
+    # The kinetic energy unitary evolution oparators for half a timestep, each is
+    # (N x N). Not diagonal, but the same in each element. We need different operators for
+    # the first and last elements in order to impose boundary conditions
+    U_K_left_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2_left) * dt/2)
+    U_K_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2) * dt/2)
+    U_K_right_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2_right) * dt/2)
+    # The same as above but for a full timestep:
+    U_K_left_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2_left) * dt)
+    U_K_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2) * dt)
+    U_K_right_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2_right) * dt)
+
+
+
 
 if __name__ == '__main__':
     initial()
