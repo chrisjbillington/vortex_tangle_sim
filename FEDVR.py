@@ -1,7 +1,5 @@
 from __future__ import division, print_function
-from pylab import figure, plot, show, grid, subplot, ylim, title, axvline, tight_layout, imshow, gca, clf
 from numpy.polynomial.polynomial import Polynomial
-from matplotlib import ticker
 import numpy as np
 import pylab as pl
 
@@ -20,7 +18,7 @@ def gauss_lobatto_points_and_weights(N, left_edge, right_edge):
     points[1:-1] = sorted(P.deriv().r)
     # And their weights:
     weights[1:-1] = 2/(N*(N - 1)*P(points[1:-1])**2)
-    # Now we scale them from [-1, 1 ] to our domain:
+    # Now we scale them from [-1, 1] to our domain:
     points = (points + 1)*(right_edge - left_edge)/2 + left_edge
     weights *= (right_edge - left_edge)/2
     return points, weights
@@ -31,8 +29,8 @@ def lobatto_shape_functions(points):
     shape functions for a set of Gauss-Lobatto quadrature points."""
     f = []
     for point in points:
-        # The Lobatto shape function corresponding to a point is simply the
-        # Lagrange basis polynomial with all the other points as roots:
+        # The Lobatto shape function corresponding to a point is simply a
+        # Lagrange basis polynomial with roots at all the other points:
         other_points = points[points!=point]
         f_i = Polynomial.fromroots(other_points)/np.prod(point - other_points)
         f.append(f_i)
@@ -187,7 +185,9 @@ class Element(object):
         obtain the total second derivative matrix element for the bridge
         function. In actual implementation, more likely one will sum them and
         then divide by two, in order to have half of the kinetic energy
-        operator operate on the bridge basis function in each element"""
+        operator operate on the bridge basis function in each element. If the
+        two adjacent elements are identical, each matrix element is already
+        half of the total, so no exchange is required."""
         d2_dx2 = np.zeros((self.N,self.N))
         for i, u_i in enumerate(self.basis):
             for j, u_j in enumerate(self.basis):
@@ -197,366 +197,144 @@ class Element(object):
         return d2_dx2
 
 
-class FiniteElements(object):
-    """Convenience class for operations on an even grid of elements"""
+class FiniteElements1D(object):
+    """A class for operations on an array of identical DVR finite elements in one dimension"""
     def __init__(self, N, n_elements, left_boundary, right_boundary):
         self.N = N
         self.n_elements = n_elements
         self.left_boundary = left_boundary
         self.right_boundary = right_boundary
-        self.boundaries = np.linspace(left_boundary, right_boundary, n_elements+1, endpoint=True)
-        width = self.boundaries[1] - self.boundaries[0]
-        self.elements = []
-        for i, (left, right) in enumerate(zip(self.boundaries, self.boundaries[1:])):
-            N_left = N if i else None
-            N_right = N if i < n_elements - 1 else None
-            element = Element(N, left, right, N_left, N_right, width, width)
-            self.elements.append(element)
 
-    def make_vectors(self, f):
-        """Takes a function of space f, and returns a list of arrays
-        containing the coefficients for that function's representation in each
-        element's DVR basis."""
-        vectors = []
-        for element in self.elements:
-            vector = element.make_vector(f)
-            vectors.append(vector)
-        return vectors
+        self.element_width = (right_boundary - left_boundary)/n_elements
+        self.element_edges = np.linspace(left_boundary, right_boundary, n_elements + 1)
 
-    def interpolate_vectors(self, vectors, x):
-        """Takes a list of vectors in the DVR basis of each element and
-        interpolates the spatial function it represents to the points in the
-        array x"""
-        psi_interpolated = np.zeros(len(x))
-        points = []
-        values = []
-        for vector, element in zip(vectors, self.elements):
-            valid = element.valid(x)
-            psi_interpolated[valid] = element.interpolate_vector(vector, x[valid])
-            for i, (point, basis_function) in enumerate(zip(element.points, element.basis)):
-                points.append(point)
-                values.append(vector[i]*basis_function(point))
-        return psi_interpolated, np.array(points), np.array(values)
+        # An element to represent all non-boundary elements, since they are
+        # identical. We instantiate it with the domain [0, element_width] and
+        # interpret its points as being relative to the left side of the
+        # specific element we're dealing with at any time.
+        self.element = Element(N, 0, self.element_width, N_left=N, N_right=N,
+                                        width_left=self.element_width, width_right=self.element_width)
+
+        # Elements for at the left and right boundaries. We use them to obtain
+        # the derivative and second derivative matrices for the boundary
+        # elements, which have zeros in them at the endpoints:
+        self.left_element = Element(N, 0, self.element_width, N_right=N, width_right=self.element_width)
+        self.right_element = Element(N, 0, self.element_width, N_left=N, width_left=self.element_width)
+
+        # construct a (self.n_elements x self.N) array for the quadrature points.
+        # The following is an 'outer sum' between the position of points within an
+        # element, and the position of the left edges of the elements:
+        self.points = self.element.points + self.element_edges[:-1, np.newaxis]
+
+        # The weights are identical in each element so we only need a length
+        # self.N array:
+        self.weights = self.element.weights
+
+        # The values of each DVR basis function at its points:
+        self.values = 1/np.sqrt(self.weights)
+        # The basis functions at the edges have different normalisation, they
+        # are 1/sqrt(2*w) rather than just 1/sqrt(w):
+        self.values[0] = 1/np.sqrt(2*self.weights[0])
+        self.values[-1] = 1/np.sqrt(2*self.weights[-1])
+
+    def density_operator(self, halved_at_edges=False):
+        """Returns a 1D array of size self.N representing the diagonals of the
+        density operator rho on an element. vec.conj()*rho*vec then gives the
+        wavefunction density |psi|^2 at each quadrature point.
+
+        if halved_at_edges=True, then the density operator will be decreased
+        by a factor of two at the edges points. This enables you to sum over
+        all elements without double counting the points on the edges."""
+        rho = 1/self.values**2
+        if halved_at_edges:
+            rho[0] /= 2
+            rho[-1] /= 2
+        return rho
 
     def derivative_operators(self):
-        """"Return a list of (self.N x self.N) arrays for the matrix
-        representations of the derivative operators of a given order in
-        the DVR basis of each element."""
-        operators = []
-        for element in self.elements:
-            operator = element.derivative_operator()
-            operators.append(operator)
-        return operators
+        """Returns three (self.N x self.N) arrays for the derivative operators
+        on the left boundary element, internal elements and right boundary
+        element."""
+        left_operator = self.left_element.derivative_operator()
+        internal_operator = self.element.derivative_operator()
+        right_operator = self.right_element.derivative_operator()
+        return left_operator, internal_operator, right_operator
 
     def second_derivative_operators(self):
-        """"Return a list of (self.N x self.N) arrays for the matrix
-        representations of the second derivative operators of a given order in
-        the DVR basis of each element."""
-        operators = []
-        for element in self.elements:
-            operator = element.second_derivative_operator()
-            operators.append(operator)
-        return operators
+        """Returns three (self.N x self.N) arrays for the second derivative
+        operators on the left boundary element, internal elements and right
+        boundary element."""
+        left_operator = self.left_element.second_derivative_operator()
+        internal_operator = self.element.second_derivative_operator()
+        right_operator = self.right_element.second_derivative_operator()
+        return left_operator, internal_operator, right_operator
 
+    def make_vectors(self, f):
+        """Takes a function of space f, and returns a (self.n_elements x
+        self.N) array containing the coefficients for that function's
+        representation in the DVR basis in each element.
 
-def gradientn(y, dx, n=1):
-    """Returns the nth derivative of y using repeated applications of
-    np.gradient. Values near the endpoints may be very wrong."""
-    result = y
-    for i in range(n):
-        result = np.gradient(result, dx)
-    return result
+        Coefficients are defined to be zero at the boundary of the problem.
+        For sensible results, f should be zero there too."""
+        psi = f(self.points)/self.values
+        # Boundary conditions:
+        psi[0] = psi[-1] = 0
+        return psi
 
+    def interpolate_vectors(self, psi, npts):
+        """Takes a (self.n_elements x self.N) array psi of DVR vectors in the
+        DVR basis and interpolates the spatial function it represents to npts
+        equally spaced points per element. Returns an array of the x points used
+        and the values at those points."""
+        # The array of points within an element:
+        x = np.linspace(0, self.element_width, npts, endpoint=False)
+        f = np.zeros((self.n_elements, npts))
+        for i, basis_function in enumerate(self.element.basis):
+            f += psi[:, i, np.newaxis]*basis_function(x)
 
-def test_single_element():
-    N = 9
+        # Create a 2D array for all the points in the domain:
+        x_all = (x + self.element_edges[:-1, np.newaxis])
+        # Flatten the output and include the rightmost boundary point:
+        x_all = np.append(x_all.flatten(), self.points[-1,-1])
+        f = np.append(f.flatten(), [0])
 
-    # Get our quadrature points and weights, our DVR basis functions, and
-    # our differential operator in the DVR basis:
-    element = Element(N, -2, 2)
-    points = element.points
-    weights = element.weights
-    basis = element.basis
-    dn_dxn = element.derivative_operator()
+        return x_all, f
 
-    # A dense grid for making plots
-    x = np.linspace(element.left_boundary, element.right_boundary, 1000)
-    dx = x[1] - x[0]
-
-    # Our Gaussian wavefunction, its representation in the DVR basis,
-    # and that representation's interpolation back onto the dense grid:
-
-    def f(x):
-        return np.exp(-x**2)
-
-    psi_dense = f(x)
-    psi = element.make_vector(f)
-    psi_interpolated = element.interpolate_vector(psi, x)
-
-    # The derivative of our Gaussian wavefunction, the derivative of its
-    # representation in the DVR basis (computed with the DVR derivative
-    # operator), and that derivatives interpolation back onto the dense grid:
-    d_psi_dense_dx = gradientn(psi_dense, dx, 1)
-    d_psi_dx = np.dot(dn_dxn, psi)
-    d_psi_dx_interpolated = element.interpolate_vector(d_psi_dx, x)
-
-    # Plot the DVR basis functions:
-    figure()
-    subplot(311)
-    title('DVR basis functions')
-    for point, basis_function in zip(points, basis):
-        plot(x, basis_function(x))
-        plot(point, basis_function(point), 'ko')
-    plot(points, np.zeros(len(points)), 'ko')
-    grid(True)
-    ylim(-1,6)
-
-    # Plot the wavefunction and its interpolated DVR representation:
-    subplot(312)
-    title('Exact and DVR Gaussian')
-    plot(x, psi_dense, 'b-')
-    plot(x, psi_interpolated, 'r--')
-    plot(points, psi/np.sqrt(weights), 'ko')
-    grid(True)
-    ylim(-0,1)
-
-    # Plot the derivative of the wavefunction and its interpolated DVR representation:
-    subplot(313)
-    title('Exact and DVR derivative')
-    plot(x, d_psi_dense_dx, 'b-')
-    plot(x, d_psi_dx_interpolated, 'r--')
-    plot(points, d_psi_dx/np.sqrt(weights), 'ko')
-    grid(True)
-    ylim(-1,1)
-
-    tight_layout()
-
-
-def test_multiple_elements():
-    # A dense grid for making plots
-    x = np.linspace(-2,2,100000)
-    dx = x[1] - x[0]
-    boundaries = np.array([-2,-1,-0.5,-0.25,0,1,2])
-    # boundaries = np.linspace(-2,2,7, endpoint=True)
-    widths = np.diff(boundaries)
-    N = [7,8,9,10,7,6]
-    # N = np.zeros(len(widths)) + 7
-    n_elements = len(boundaries) - 1
-
-    elements = []
-    for i, (x_l, x_r) in enumerate(zip(boundaries, boundaries[1:])):
-        N_left = N[i-1] if i > 0 else None
-        N_right = N[i+1] if i < n_elements - 1 else None
-        width_left = widths[i-1] if i > 0 else None
-        width_right = widths[i+1] if i < n_elements - 1 else None
-        element = Element(N[i], x_l, x_r, N_left, N_right, width_left=width_left, width_right=width_right)
-        elements.append(element)
-
-    # Our Gaussian wavefunction, its representation in the DVR basis,
-    # and that representation's interpolation back onto the dense grid:
-    def f(x):
-        return np.exp(-x**2/(0.5**2))
-
-    psi_dense = f(x)
-    psi = [e.make_vector(f) for e in elements]
-    psi_interpolated = [e.interpolate_vector(psi_n, x) for psi_n, e in zip(psi, elements)]
-
-    # The exact derivative of the wavefunction:
-    # d_psi_dense_dx = gradientn(psi_dense, dx, 1)
-    d_psi_dense_dx = gradientn(psi_dense, dx, 2)
-
-    # Plot the FEDVR basis functions:
-    figure()
-    subplot(231)
-    title('FEDVR basis functions')
-    for element in elements:
-        for point, weight, basis_function in zip(element.points, element.weights, element.basis):
-            plot(x, basis_function(x))
-            plot(point, 1*basis_function(point), 'ko')
-    for boundary in boundaries:
-        axvline(boundary, linestyle='--', color='k')
-    grid(True)
-    ylim(-2,10)
-
-    # Plot the wavefunction and its interpolated FEDVR representation:
-    subplot(232)
-    title('Exact and FEDVR Gaussian')
-    plot(x, psi_dense, 'k-')
-    for element, psi_n, psi_interpolated_n in zip(elements, psi, psi_interpolated):
-        valid = element.valid(x)
-        for point, basis_function, c in zip(element.points, element.basis, psi_n):
-            plot(point, c*basis_function(point), 'ko')
-        plot(x[valid], psi_interpolated_n[valid], '--')
-    for boundary in boundaries:
-        axvline(boundary, linestyle='--', color='k')
-    grid(True)
-    ylim(-0,1)
-
-    # Plot the derivative of the wavefunction:
-    subplot(233)
-    title('Exact and FEDVR elementwise derivative')
-    plot(x, d_psi_dense_dx, 'k-')
-    d_psi_dx = []
-    for element, psi_n in zip(elements, psi):
-        # dn_dxn = element.derivative_operator()
-        dn_dxn = element.second_derivative_operator()
-        d_psi_n_dx = np.dot(dn_dxn, psi_n)
-        d_psi_dx.append(d_psi_n_dx)
-    for left_deriv, right_deriv in zip(d_psi_dx, d_psi_dx[1:]):
-        left_deriv[-1] = right_deriv[0] = left_deriv[-1] + right_deriv[0]
-
-    for element, psi_n , d_psi_n_dx in zip(elements, psi, d_psi_dx):
-        valid = element.valid(x)
-        d_psi_dx_interpolated = element.interpolate_vector(d_psi_n_dx, x)
-        for i, point in enumerate(element.points):
-            plot(point, d_psi_n_dx[i]*element.basis[i](point), 'ko')
-        plot(x[valid], d_psi_dx_interpolated[valid], '--')
-    for boundary in boundaries:
-        axvline(boundary, linestyle='--', color='k')
-    grid(True)
-    ylim(-10, 4)
-
-    # Plot the derivative of the wavefunction using the total derivative operator:
-    subplot(234)
-    title('Total derivative operator')
-
-    # Lets construct the overall derivative operator:
-    total_N = sum(N) - n_elements + 1
-    D_total = np.zeros((total_N, total_N))
-    psi_total = np.zeros(total_N)
-    weights = np.zeros(total_N)
-    points = np.zeros(total_N)
-    start_index = 0
-    for i, element in enumerate(elements):
-        # dn_dxn = element.derivative_operator()
-        dn_dxn = element.second_derivative_operator()
-        end_index = start_index + N[i]
-        D_total[start_index:end_index, start_index:end_index] = dn_dxn
-        psi_total[start_index:end_index] = psi[i]
-        for j, (point, basis_function) in enumerate(zip(element.points, element.basis)):
-            weights[start_index+j] = basis_function(point)
-            points[start_index+j] = point
-        start_index += N[i] - 1
-
-    D_plot = D_total.copy()
-    D_plot[np.abs(D_plot)<1e-8] = np.nan
-    # D_plot = np.sign(D_plot)*np.log(np.abs(D_plot))
-    imshow(D_plot, interpolation='nearest')
-    loc = ticker.IndexLocator(base=1, offset=0)
-    ax = gca()
-    ax.xaxis.set_minor_locator(loc)
-    ax.yaxis.set_minor_locator(loc)
-    ax.grid(which='minor', axis='both', linestyle='-')
-
-    subplot(235)
-    # clf()
-    title('Exact and FEDVR derivative with total operator')
-    plot(x, d_psi_dense_dx, 'k-')
-    d_psi_total_dx = weights*np.dot(D_total, psi_total)
-    plot(points, d_psi_total_dx, 'ko')
-    for element, psi_n , d_psi_n_dx in zip(elements, psi, d_psi_dx):
-        valid = element.valid(x)
-        d_psi_dx_interpolated = element.interpolate_vector(d_psi_n_dx, x)
-        for i, point in enumerate(element.points):
-            plot(point, d_psi_n_dx[i]*element.basis[i](point), 'ko')
-        plot(x[valid], d_psi_dx_interpolated[valid], '--')
-    for boundary in boundaries:
-        axvline(boundary, linestyle='--', color='k')
-    grid(True)
-    ylim(-10, 4)
-
-
-def test_derivative(order=1, equal=True):
-    figure()
-    # A dense grid for making plots
-    x = np.linspace(-2,2,100000)
-    dx = x[1] - x[0]
-    if equal:
-        boundaries = np.linspace(-2, 2, 12)
-    else:
-        boundaries = np.array([-2,-1,-0.5,-0.25,0,1,2])
-    widths = np.diff(boundaries)
-    if equal:
-        N = np.zeros(len(widths)) + 7
-    else:
-        N = [7,8,9,10,12,6]
-    n_elements = len(boundaries) - 1
-
-    elements = []
-    for i, (x_l, x_r) in enumerate(zip(boundaries, boundaries[1:])):
-        N_left = N[i-1] if i > 0 else None
-        N_right = N[i+1] if i < n_elements - 1 else None
-        width_left = widths[i-1] if i > 0 else None
-        width_right = widths[i+1] if i < n_elements - 1 else None
-        element = Element(N[i], x_l, x_r, N_left, N_right, width_left=width_left, width_right=width_right)
-        elements.append(element)
-
-    # Our Gaussian wavefunction, its representation in the DVR basis,
-    # and that representation's interpolation back onto the dense grid:
-    def f(x):
-        return np.exp(-x**2/(0.5**2))
-
-    psi_dense = f(x)
-    psi = [e.make_vector(f) for e in elements]
-
-    # The exact derivative of the wavefunction:
-    d_psi_dense_dx = gradientn(psi_dense, dx, order)
-
-    # Plot the derivative of the wavefunction using the total derivative operator:
-    subplot(121)
-    if order == 1:
-        title('First derivative operator')
-    else:
-        title('Second derivative operator')
-
-    # Lets construct the overall derivative operator:
-    total_N = sum(N) - n_elements + 1
-    D_total = np.zeros((total_N, total_N))
-    psi_total = np.zeros(total_N)
-    weights = np.zeros(total_N)
-    points = np.zeros(total_N)
-    start_index = 0
-    for i, element in enumerate(elements):
-        dn_dxn = element.derivative_operator()
-        if order == 2:
-            dn_dxn = element.second_derivative_operator()
-        else:
-            dn_dxn = element.derivative_operator()
-        end_index = start_index + N[i]
-        D_total[start_index:end_index, start_index:end_index] += dn_dxn
-        psi_total[start_index:end_index] = psi[i]
-        for j, (point, basis_function) in enumerate(zip(element.points, element.basis)):
-            weights[start_index+j] = basis_function(point)
-            points[start_index+j] = point
-        start_index += N[i] - 1
-
-    D_plot = D_total.copy()
-    D_plot[np.abs(D_plot)<1e-8] = np.nan
-    imshow(D_plot, interpolation='nearest')
-    loc = ticker.IndexLocator(base=1, offset=0)
-    ax = gca()
-    ax.xaxis.set_minor_locator(loc)
-    ax.yaxis.set_minor_locator(loc)
-    ax.grid(which='minor', axis='both', linestyle='-')
-    pl.colorbar()
-
-    subplot(122)
-    if order == 1:
-        title('Exact and FEDVR first derivative')
-    else:
-        title('Exact and FEDVR second derivative')
-    plot(x, d_psi_dense_dx, 'k-')
-    d_psi_total_dx = np.dot(D_total, psi_total)
-    plot(points, weights*d_psi_total_dx, 'ko')
-    for boundary in boundaries:
-        axvline(boundary, linestyle='--', color='k')
-    grid(True)
-    ylim(-10,4)
+    def get_values(self, psi):
+        """Takes a (self.n_elements x self.N) array psi of DVR vectors in the
+        DVR basis. Returns a 1D array of quadrature points and a 1D array of
+        the values at those points of spatial function the DVR vector
+        represents."""
+        values = psi*self.values
+        return self.points.flatten(), values.flatten()
 
 
 if __name__ == '__main__':
-    # test_single_element()
-    # test_multiple_elements()
-    test_derivative(order=1)
-    test_derivative(order=2)
-    show()
+
+    USE_ALTERNATE_ALGORITHM = True
+    # Space:
+    x_min = -15e-6
+    x_max = 15e-6
+
+    # Finite elements:
+    N = 18
+    n_elements = 10
+
+    elements = FiniteElements1D(N, n_elements, x_min, x_max)
+
+    def f(x):
+        sigma = 3e-6
+        return np.exp(-x**2/(2*sigma**2))
+
+    psi = elements.make_vectors(f)
+    x_interp, psi_interp = elements.interpolate_vectors(psi, 10000)
+    points, psi_values = elements.get_values(psi)
+    x = np.linspace(x_min, x_max, 10000)
+    psi_exact = f(x)
+    pl.plot(x*1e6, psi_exact, 'k-')
+    pl.plot(x_interp*1e6, psi_interp, 'r--')
+    pl.plot(points*1e6, psi_values, 'ko')
+    pl.grid(True)
+    for edge in elements.element_edges:
+        pl.axvline(edge*1e6, linestyle='--', color='k')
+    pl.show()

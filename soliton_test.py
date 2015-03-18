@@ -43,8 +43,16 @@ f_laplacian = -(kx**2)
 
 
 # Finite elements:
-N = 4
-n_elements = 50
+N = 7
+n_elements = 10
+
+element_width = (x_max - x_min)/n_elements
+element_boundaries = np.lispace(x_min, x_max, n_elements + 1)
+
+# A single element we will use to represent all elements, since they are
+# identical. We instantiate it with the domain [0, element_width] and
+# interpret its points as being relative to the left side of the specific
+# element we're dealing with at any time.
 elements = FiniteElements(N, n_elements, x_min, x_max)
 
 # Second derivative operators:
