@@ -237,18 +237,11 @@ class FiniteElements1D(object):
         self.values[0] = 1/np.sqrt(2*self.weights[0])
         self.values[-1] = 1/np.sqrt(2*self.weights[-1])
 
-    def density_operator(self, halved_at_edges=False):
+    def density_operator(self):
         """Returns a 1D array of size self.N representing the diagonals of the
         density operator rho on an element. vec.conj()*rho*vec then gives the
-        wavefunction density |psi|^2 at each quadrature point.
-
-        if halved_at_edges=True, then the density operator will be decreased
-        by a factor of two at the edges points. This enables you to sum over
-        all elements without double counting the points on the edges."""
-        rho = 1/self.values**2
-        if halved_at_edges:
-            rho[0] /= 2
-            rho[-1] /= 2
+        wavefunction density |psi|^2 at each quadrature point."""
+        rho = self.values**2
         return rho
 
     def derivative_operators(self):

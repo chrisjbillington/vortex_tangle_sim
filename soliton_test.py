@@ -33,7 +33,7 @@ x_max = 15e-6
 
 # Finite elements:
 N = 7
-n_elements = 10
+n_elements = 100
 assert not (n_elements % 2) # Algorithm below relies on last element being odd numbered
 elements = FiniteElements1D(N, n_elements, x_min, x_max)
 
@@ -42,7 +42,7 @@ element_numbers = np.array(range(n_elements))
 even = (element_numbers % 2) == 0
 odd = ~even
 # Which are internal, which are on boundaries?
-internal = (0 < element_numbers) & (element_numbers < N-1)
+internal = (0 < element_numbers) & (element_numbers < n_elements - 1)
 odd_internal = odd & internal
 even_internal = even & internal
 
@@ -54,22 +54,33 @@ grad2_left, grad2, grad2_right = elements.second_derivative_operators()
 # containing its diagonals:
 density_operator = elements.density_operator()
 
-# The same except with half the weight at the edges so that we don't double
-# count edges when we sum over all elements:
-norm_operator = elements.density_operator(halved_at_edges=True)
-
 # The spatial points of the DVR basis functions, an (n_elements x N) array
 x = elements.points
 
 # The Harmonic trap at our gridpoints, (n_elements x N):
 V = 0.5*m*omega**2*x**2
 
-def plot(*args):
-    pass
+def plot(psi):
+    x_interp, psi_interp = elements.interpolate_vector(psi, 100)
+    mod2psi_exact = rho_max*(1 - x_interp**2/R**2)
+    mod2psi_exact = np.clip(mod2psi_exact, 0, None)
+    points, values = elements.get_values(psi)
+    pl.plot(x_interp*1e6, mod2psi_exact, 'k-')
+    pl.plot(x_interp*1e6, np.abs(psi_interp)**2, 'r-')
+    # pl.plot(x_interp*1e6, np.abs(psi_interp.real)**2, 'g-')
+    pl.plot(x_interp*1e6, (pl.angle(psi_interp)+pi)/(2*pi)*3e20, 'g-')
+    # pl.plot(points*1e6, np.abs(values)**2*np.sign(values.real), 'ko')
+    pl.grid(True)
+    # for edge in elements.element_edges:
+    #     pl.axvline(edge*1e6, linestyle='--', color='k')
+    pl.axis([-15,15,0,3e20])
+    pl.savefig('output.png')
+    # pl.show()
+    pl.clf()
 
 def initial():
-    dt = 2e-7
-    t_final = 30e-3
+    dt = 1e-7
+    t_final = 1
 
     # The potential energy evolution operator for half a timestep in imaginary
     # time, (n_elements x N). It is a diagonal operator, so the below array is
@@ -80,18 +91,18 @@ def initial():
     # time, each is (N x N). Not diagonal, but the same in each element. We
     # need different operators for the first and last elements in order to
     # impose boundary conditions
-    U_K_left_halfstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2_left) * dt/2)
     U_K_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2) * dt/2)
     U_K_right_halfstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2_right) * dt/2)
     # The same as above but for a full timestep:
     U_K_left_fullstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2_left) * dt)
     U_K_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2) * dt)
-    U_K_right_fullstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2_right) * dt)
 
     def renormalise(psi):
         # imposing normalisation on the wavefunction:
-        ncalc = (psi.conj()*norm_operator*psi).sum()
-        psi[:] *= np.sqrt(N_1D/ncalc.real)
+        p = psi[:,:-1] # Don't double count edges, ok to exclude last edge (should be zero there)
+        ncalc = np.vdot(p, p)
+        print(ncalc)
+        psi[:] *= np.sqrt(N_1D/ncalc)
 
     # The initial guess:
     def initial_guess(x):
@@ -101,55 +112,68 @@ def initial():
     psi = elements.make_vector(initial_guess)
     renormalise(psi)
 
-    # Creating a dictionary of triggers that will be called repeatedly
-    # during integration. The function output.sample will be called
-    # every 50 steps:
-    routines = {1: renormalise, 2000:plot}
+    # Guess for the chemical potential, will be updated thoughout the
+    # simulation:
+    mu = g*rho_max
 
-    # The nonlinear evolution operator for the first half timestep in
-    # imaginary time. It is always the same as the end of timesteps, so other
-    # than this first timestep we just re-use it from then
+    # The potential energy evolution operator for the first half timestep in
+    # imaginary time. It is always the same as at the end of timesteps, so we
+    # usually just re-use at the start of each loop. But this being the first
+    # loop we need it now too.
     density = psi.conj()*density_operator*psi
-    U_nonlinear_halfstep = np.exp(-1/hbar * g * density * dt/2)
+    U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
 
     i = 0
     t = 0
+    import time
+    start_time = time.time()
     while t < t_final:
-        # Evolve for half a step with nonlinear and potential:
-        psi = U_V_halfstep*U_nonlinear_halfstep*psi
+        # Evolve for half a step with potential evolution operator:
+        psi = U_V_halfstep*psi
 
-        # Evolve odd elements for half a step with kinetic
-        try:
-            psi[odd_internal] = np.einsum('ij,jn->in', U_K_halfstep, psi[odd_internal])
-        except:
-            import IPython
-            IPython.embed()
-        psi[-1] = np.einsum('ij,jn->in', U_K_right_halfstep, psi[-1])
+        # Evolve odd elements for half a step with kinetic energy evolution operator:
+        psi[odd_internal] = np.einsum('ij,nj->ni', U_K_halfstep, psi[odd_internal])
+        psi[-1] = np.einsum('ij,j->i', U_K_right_halfstep, psi[-1])
 
-        # Copy odd endpoints -> adjacent even endpoints
+        # Copy odd endpoints -> adjacent even endpoints:
+        psi[even, -1] = psi[odd, 0]
+        psi[even_internal, 0] = psi[odd_internal, -1]
 
-        # Evolve even elements for a full step with kinetic
+        # Evolve even elements for a full step with kinetic energy evolution operator:
+        psi[even_internal] = np.einsum('ij,nj->ni', U_K_fullstep, psi[even_internal])
+        psi[0] = np.einsum('ij,j->i', U_K_left_fullstep, psi[0])
 
-        # Copy even elements -> adjacent odd endpoints
+        # Copy even elements -> adjacent odd endpoints:
+        psi[odd_internal, -1] = psi[even_internal, 0]
+        psi[odd, 0] = psi[even, -1]
 
-        # Evolve odd elements for half a step with kinetic
+        # Evolve odd elements for half a step with kinetic energy evolution operator:
+        psi[odd_internal] = np.einsum('ij,nj->ni', U_K_halfstep, psi[odd_internal])
+        psi[-1] = np.einsum('ij,j->i', U_K_right_halfstep, psi[-1])
 
-        # Renormalise
+        # Renormalise:
+        renormalise(psi)
 
-        # if last step or outputting this step:
-            # Calculate nonlinear evolution operator for half a step
+        # Calculate nonlinear evolution operator for half a step
+        density = psi.conj()*density_operator*psi
+        U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
 
-            # Evolve for half a step with nonlinear and potential
+        # Evolve for half a timestep with potential evolution operator:
+        psi = U_V_halfstep*psi
 
-            # Renormalise
+        if not i % 10000:
+            print((time.time() - start_time)/(i+1)*1e6, 'us per loop')
+            # Renormalise:
+            renormalise(psi)
+            plot(psi)
+            # print(i)
 
-        # else:
-            # Calculate nonlinear evolution operator for full step
+        i += 1
+        t += dt
 
-            # Evolve for a full step with nonlinear and potential
 
 def evolution():
-    dt = 2e-7
+    dt = 2e-8
     t_final = 30e-3
 
     # The potential energy unitary evolution operator for half a timestep,
@@ -172,4 +196,5 @@ def evolution():
 
 
 if __name__ == '__main__':
+    import bprofile
     initial()
