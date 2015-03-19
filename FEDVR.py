@@ -208,18 +208,12 @@ class FiniteElements1D(object):
         self.element_width = (right_boundary - left_boundary)/n_elements
         self.element_edges = np.linspace(left_boundary, right_boundary, n_elements + 1)
 
-        # An element to represent all non-boundary elements, since they are
-        # identical. We instantiate it with the domain [0, element_width] and
-        # interpret its points as being relative to the left side of the
-        # specific element we're dealing with at any time.
+        # An element to represent all elements, since they are identical. We
+        # instantiate it with the domain [0, element_width] and interpret its
+        # points as being relative to the left side of the specific element
+        # we're dealing with at any time.
         self.element = Element(N, 0, self.element_width, N_left=N, N_right=N,
                                         width_left=self.element_width, width_right=self.element_width)
-
-        # Elements for at the left and right boundaries. We use them to obtain
-        # the derivative and second derivative matrices for the boundary
-        # elements, which have zeros in them at the endpoints:
-        self.left_element = Element(N, 0, self.element_width, N_right=N, width_right=self.element_width)
-        self.right_element = Element(N, 0, self.element_width, N_left=N, width_left=self.element_width)
 
         # construct a (self.n_elements x self.N) array for the quadrature points.
         # The following is an 'outer sum' between the position of points within an
@@ -245,34 +239,21 @@ class FiniteElements1D(object):
         return rho
 
     def derivative_operators(self):
-        """Returns three (self.N x self.N) arrays for the derivative operators
-        on the left boundary element, internal elements and right boundary
-        element."""
-        left_operator = self.left_element.derivative_operator()
-        internal_operator = self.element.derivative_operator()
-        right_operator = self.right_element.derivative_operator()
-        return left_operator, internal_operator, right_operator
+        """Returns a (self.N x self.N) array for the derivative operator on
+        each element"""
+        return self.element.derivative_operator()
 
     def second_derivative_operators(self):
-        """Returns three (self.N x self.N) arrays for the second derivative
-        operators on the left boundary element, internal elements and right
-        boundary element."""
-        left_operator = self.left_element.second_derivative_operator()
-        internal_operator = self.element.second_derivative_operator()
-        right_operator = self.right_element.second_derivative_operator()
-        return left_operator, internal_operator, right_operator
+        """Returns a (self.N x self.N) array for the second derivative
+        operator on each element"""
+        return self.element.second_derivative_operator()
 
     def make_vector(self, f):
         """Takes a function of space f, and returns a (self.n_elements x
         self.N) array containing the coefficients for that function's
-        representation in the DVR basis in each element.
-
-        Coefficients are defined to be zero at the boundary of the problem.
-        For sensible results, f should be zero there too."""
+        representation in the DVR basis in each element."""
         psi = np.zeros(self.points.shape, dtype=complex)
         psi[:] = f(self.points)/self.values
-        # Boundary conditions:
-        psi[0,0] = psi[-1,-1] = 0
         return psi
 
     def interpolate_vector(self, psi, npts):
@@ -290,7 +271,7 @@ class FiniteElements1D(object):
         x_all = (x + self.element_edges[:-1, np.newaxis])
         # Flatten the output and include the rightmost boundary point:
         x_all = np.append(x_all.flatten(), self.points[-1,-1])
-        f = np.append(f.flatten(), [0])
+        f = np.append(f.flatten(), [f[0,0]])
 
         return x_all, f
 
