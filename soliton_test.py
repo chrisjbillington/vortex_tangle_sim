@@ -117,7 +117,7 @@ def initial():
 
         # Total Hamaltonian:
         density = psi.conj()*density_operator*psi
-        H_psi = K_psi + V + g * density * psi
+        H_psi = K_psi + (V + g * density) * psi
 
         # Expectation value and uncertainty of Hamiltonian gives the
         # expectation value and uncertainty of the chemical potential:
