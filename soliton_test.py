@@ -26,15 +26,15 @@ rho_max = 2.5e14*1e6                        # Desired max Thomas-Fermi density
 R = 7.5e-6                                  # Desired Thomas-Fermi radius
 N_1D, omega = get_number_and_trap(rho_max, R)  # 1D normalisation constant and harmonic trap frequency
                                                # corresponding to the desired maximum density and radius
-mu = g*rho_max                              # The chemical potential
+mu_guess = g*rho_max                        # The estimated chemical potential of the groundstate
 
 # Space:
 x_min = -15e-6
 x_max = 15e-6
 
 # Finite elements:
-N = 7
-n_elements = 100
+N = 15
+n_elements = 10
 assert not (n_elements % 2) # Algorithm below relies on last element being odd numbered
 elements = FiniteElements1D(N, n_elements, x_min, x_max)
 
@@ -78,22 +78,18 @@ def plot(i, t, psi):
     # pl.show()
     pl.clf()
 
+
 def initial():
-    dt = 1e-6
-    t_final = 1
 
-    # The potential energy evolution operator for half a timestep in imaginary
-    # time, (n_elements x N). It is a diagonal operator, so the below array is
-    # just the diagonals and is applied by multiplying psi elementwise:
-    U_V_halfstep = np.exp(-1/hbar * V * dt/2)
+    def kinetic_evolution_operators(dt):
+        # The kinetic energy evolution operator for half a timestep in
+        # imaginary time, each is (N x N). Not diagonal, but the same in each
+        # element.
+        U_K_halfstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2) * dt/2)
+        # The same as above but for a full timestep:
+        U_K_fullstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2) * dt)
 
-    # The kinetic energy evolution oparators for half a timestep in imaginary
-    # time, each is (N x N). Not diagonal, but the same in each element. We
-    # need different operators for the first and last elements in order to
-    # impose boundary conditions
-    U_K_halfstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2) * dt/2)
-    # The same as above but for a full timestep:
-    U_K_fullstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2) * dt)
+        return U_K_halfstep, U_K_fullstep
 
     def renormalise(psi):
         # imposing normalisation on the wavefunction:
@@ -105,6 +101,32 @@ def initial():
         # psi[x<0] = -np.abs(psi[x < 0])
         # psi[x>=0] = np.abs(psi[x >= 0])
 
+    def compute_mu(psi):
+
+        # Kinetic energy operator:
+        K = -hbar**2/(2*m)*grad2
+
+        # Kinetic energy operator operating on psi:
+        K_psi = np.einsum('ij,nj->ni', K, psi)
+        K_psi[1:,0] += K_psi[:-1,-1]
+        K_psi[:-1, -1] = K_psi[1:, 0]
+
+        # Total norm:
+        p = psi[:,:-1] # Don't double count edges
+        ncalc = np.vdot(p, p).real
+
+        # Total Hamaltonian:
+        density = psi.conj()*density_operator*psi
+        H_psi = K_psi + V + g * density * psi
+
+        # Expectation value and uncertainty of Hamiltonian gives the
+        # expectation value and uncertainty of the chemical potential:
+        mu = np.vdot(p, H_psi[:,:-1]).real/ncalc
+        mu2 = np.vdot(H_psi[:,:-1], H_psi[:,:-1]).real/ncalc
+        u_mu = np.sqrt(mu2 - mu**2)
+
+        return mu, u_mu/mu
+
     # The initial guess:
     def initial_guess(x):
         sigma = 0.5*R
@@ -114,6 +136,13 @@ def initial():
 
     psi = elements.make_vector(initial_guess)
     renormalise(psi)
+
+    # Estimate of chemical potential, will be updated throughout simulation:
+    mu = mu_guess
+
+    dt = 1e-7
+    U_K_halfstep, U_K_fullstep = kinetic_evolution_operators(dt)
+
     # The potential energy evolution operator for the first half timestep in
     # imaginary time. It is always the same as at the end of timesteps, so we
     # usually just re-use at the start of each loop. But this being the first
@@ -123,9 +152,10 @@ def initial():
 
     i = 0
     t = 0
-
     start_time = time.time()
-    while t < t_final:
+    # How often, in timesteps, should we consider adjusting the timstep size?
+    timestep_adjust_period = 1000
+    while True:
         # Evolve for half a step with potential evolution operator:
         psi = U_V_halfstep*psi
 
@@ -158,10 +188,79 @@ def initial():
         # Evolve for half a timestep with potential evolution operator:
         psi = U_V_halfstep*psi
 
+        # The below three if statements execute on successive iterations.
+        # They measure the effect of using a larger or smaller timestep,
+        # and adjust it accordingly.
+        if i % timestep_adjust_period == 0:
+            # Assess whether larger or smaller timesteps lead to faster
+            # convergence. First, record how fast energy is going down in one
+            # step with the timestep what it is now:
+            mu, convergence = compute_mu(psi)
+            # Updating this because it depends on mu, which we just
+            # recalculated:
+            U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
+
+        elif i % timestep_adjust_period == 1:
+            # print('testing timestep')
+            # How fast did mu decrease when we left the timestep the same?
+            previous_mu = mu
+            mu, convergence = compute_mu(psi)
+            mu_change_same = mu - previous_mu
+            # Now make it bigger, see what happens:
+            unchanged_timestep = dt
+            dt = unchanged_timestep*2
+            # Recompute evolution matrices:
+            U_K_halfstep, U_K_fullstep = kinetic_evolution_operators(dt)
+            U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
+
+        elif i % timestep_adjust_period == 2:
+            # print('testing bigger timestep')
+            # How fast did mu decrease when we made the timestep bigger?
+            previous_mu = mu
+            mu, convergence = compute_mu(psi)
+            mu_change_bigger = mu - previous_mu
+            # Now make it smaller, see what happens:
+            dt = unchanged_timestep/2
+            # Recompute evolution matrices:
+            U_K_halfstep, U_K_fullstep = kinetic_evolution_operators(dt)
+            U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
+
+        elif i % timestep_adjust_period == 3:
+            # print('testing smaller timestep')
+            # How fast did mu decrease when we made the timestep smaller?
+            previous_mu = mu
+            mu, convergence = compute_mu(psi)
+            mu_change_smaller = mu - previous_mu
+
+            # Which timestep gave us the biggest decrease in mu?
+            best_change = min(mu_change_smaller, mu_change_same, mu_change_bigger)
+            if best_change == mu_change_same:
+                # leave timestep the same as before:
+                dt = unchanged_timestep
+                # print('leaving dt = ', dt)
+            elif best_change == mu_change_smaller:
+                # Smallest timestep is best timestep:
+                dt = unchanged_timestep / 2
+                print('setting dt = ', dt)
+            elif best_change == mu_change_bigger:
+                dt = unchanged_timestep
+                # biggest timestep is best timestep
+                # dt = unchanged_timestep * 2
+                # print('setting dt = ', dt)
+
+            # Recompute evolution matrices:
+            U_K_halfstep, U_K_fullstep = kinetic_evolution_operators(dt)
+            U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
+
+
+
         if not i % 10000:
             print((time.time() - start_time)/(i+1)*1e6, 'us per loop')
             renormalise(psi)
             plot(i, t, psi)
+            mu, convergence = compute_mu(psi)
+            print('convergence:', convergence)
+            print('mu:', mu)
 
         i += 1
         t += dt
