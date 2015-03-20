@@ -5,6 +5,15 @@ import pylab as pl
 from scipy.linalg import expm
 from FEDVR import FiniteElements1D
 
+import matplotlib
+matplotlib.use("QT4Agg")
+from matplotlib.backends.backend_qt4agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt4agg import NavigationToolbar2QT as NavigationToolbar
+
+from PyQt4 import QtCore, QtGui
+from qtutils import inthread, inmain_decorator
+
+
 
 def get_number_and_trap(rho_max, R):
     """Return the 1D normalisation constant N (units of atoms per unit area)
@@ -26,26 +35,34 @@ rho_max = 2.5e14*1e6                        # Desired max Thomas-Fermi density
 R = 7.5e-6                                  # Desired Thomas-Fermi radius
 N_1D, omega = get_number_and_trap(rho_max, R)  # 1D normalisation constant and harmonic trap frequency
                                                # corresponding to the desired maximum density and radius
-mu_guess = g*rho_max                        # The estimated chemical potential of the groundstate
+mu = g*rho_max                              # Chemical potential of the groundstate
 
 # Space:
 x_min = -15e-6
 x_max = 15e-6
 
 # Finite elements:
-N = 15
-n_elements = 10
-assert not (n_elements % 2) # Algorithm below relies on last element being odd numbered
+N = 7
+n_elements = 50
+assert not (n_elements % 2), "Odd-even split step method requires an even number of elements"
+assert (N % 2), "Gauss Seidel checkerboard method requires odd number of basis functions per element"
+
 elements = FiniteElements1D(N, n_elements, x_min, x_max)
 
 # Which elements are odd numbered, and which are even?
 element_numbers = np.array(range(n_elements))
-even = (element_numbers % 2) == 0
-odd = ~even
-# Which are internal, which are on boundaries?
-internal = (0 < element_numbers) & (element_numbers < n_elements - 1)
-odd_internal = odd & internal
-even_internal = even & internal
+even_elements = (element_numbers % 2) == 0
+odd_elements = ~even_elements
+
+# Which elements are internal, and which are on boundaries?
+internal_elements = (0 < element_numbers) & (element_numbers < n_elements - 1)
+odd_internal_elements = odd_elements & internal_elements
+even_internal_elements = even_elements & internal_elements
+
+# Which quadrature points are odd numbered, and which are even?
+point_numbers = np.array(range(N))
+even_points = (point_numbers % 2) == 0
+odd_points = ~even_points
 
 # Second derivative operator, (N x N):
 grad2 = elements.second_derivative_operators()
@@ -60,36 +77,74 @@ x = elements.points
 # The Harmonic trap at our gridpoints, (n_elements x N):
 V = 0.5*m*omega**2*x**2
 
-def plot(i, t, psi):
-    x_plot = x.flatten()
-    x_interp, values_interp = elements.interpolate_vector(psi, 100)
+@inmain_decorator()
+def plot(psi, t=None, show=False):
+    x_plot, values = elements.get_values(psi)
+    psi_tf = rho_max*(1 - x_plot**2/R**2)
+    psi_tf = np.sqrt(np.clip(psi_tf, 0, None))
 
-    mod2psi_tf = rho_max*(1 - x_plot**2/R**2)
-    mod2psi_tf = np.clip(mod2psi_tf, 0, None)
-    pl.plot(x_plot*1e6, mod2psi_tf, 'k-')
-    pl.plot(x_plot*1e6, (pl.angle(psi.flatten())+pi)/(2*pi)*3e20, 'g-')
-    pl.plot(x_interp*1e6, np.abs(values_interp)**2, 'b-')
+    if not figure.axes:
+        pl.title('BEC in a trap')
+        pl.xlabel('$x\ (\mu\mathrm{m})$')
+        pl.ylabel('wavefunction real and imaginary parts')
+        pl.axis([-15,15,-2e10,2e10])
+    pl.gca().lines = []
+
+    pl.plot(x_plot*1e6, psi_tf, 'k-')
+    pl.plot(x_plot*1e6, values.real, 'b-')
+    pl.plot(x_plot*1e6, values.imag, 'g-')
     pl.grid(True)
-    # for edge in elements.element_edges:
-    #     pl.axvline(edge*1e6, linestyle='--', color='k')
-    pl.axis([-15,15,0,3e20])
-    pl.figtext(0.15, 0.125, r'$t=%.00f\,\mathrm{ms}$'%(t*1e3))
-    pl.savefig('output.png')
-    # pl.show()
-    pl.clf()
+
+
+    figure.texts = []
+    if t is not None:
+        pl.figtext(0.15, 0.125, r'$t=%.00f\,\mathrm{ms}$'%(t*1e3))
+    # pl.savefig('output.png')
+    canvas.draw_idle()
+    if show:
+        pl.show()
+
+
+def compute_mu(psi):
+
+    # Kinetic energy operator:
+    K = -hbar**2/(2*m)*grad2
+
+    # Kinetic energy operator operating on psi:
+    K_psi = np.einsum('ij,nj->ni', K, psi)
+    K_psi[1:,0] += K_psi[:-1,-1]
+    K_psi[:-1, -1] = K_psi[1:, 0]
+    K_psi[0,0] += K_psi[-1,-1]
+    K_psi[-1, -1] = K_psi[0, 0]
+
+    # Total norm:
+    p = psi[:,:-1] # Don't double count edges
+    ncalc = np.vdot(p, p).real
+
+    # Total Hamaltonian:
+    density = psi.conj()*density_operator*psi
+    H_psi = K_psi + (V + g * density) * psi
+
+    # Expectation value and uncertainty of Hamiltonian gives the
+    # expectation value and uncertainty of the chemical potential:
+    mu = np.vdot(p, H_psi[:,:-1]).real/ncalc
+    mu2 = np.vdot(H_psi[:,:-1], H_psi[:,:-1]).real/ncalc
+    var_mu = mu2 - mu**2
+    if var_mu < 0:
+        u_mu = 0
+    else:
+        u_mu = np.sqrt(var_mu)
+    return mu, u_mu/mu
+
+
+def compute_number(psi):
+    # Total norm:
+    p = psi[:,:-1] # Don't double count edges
+    ncalc = np.vdot(p, p).real
+    return ncalc
 
 
 def initial():
-
-    def kinetic_evolution_operators(dt):
-        # The kinetic energy evolution operator for half a timestep in
-        # imaginary time, each is (N x N). Not diagonal, but the same in each
-        # element.
-        U_K_halfstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2) * dt/2)
-        # The same as above but for a full timestep:
-        U_K_fullstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2) * dt)
-
-        return U_K_halfstep, U_K_fullstep
 
     def renormalise(psi):
         # imposing normalisation on the wavefunction:
@@ -101,32 +156,6 @@ def initial():
         # psi[x<0] = -np.abs(psi[x < 0])
         # psi[x>=0] = np.abs(psi[x >= 0])
 
-    def compute_mu(psi):
-
-        # Kinetic energy operator:
-        K = -hbar**2/(2*m)*grad2
-
-        # Kinetic energy operator operating on psi:
-        K_psi = np.einsum('ij,nj->ni', K, psi)
-        K_psi[1:,0] += K_psi[:-1,-1]
-        K_psi[:-1, -1] = K_psi[1:, 0]
-
-        # Total norm:
-        p = psi[:,:-1] # Don't double count edges
-        ncalc = np.vdot(p, p).real
-
-        # Total Hamaltonian:
-        density = psi.conj()*density_operator*psi
-        H_psi = K_psi + (V + g * density) * psi
-
-        # Expectation value and uncertainty of Hamiltonian gives the
-        # expectation value and uncertainty of the chemical potential:
-        mu = np.vdot(p, H_psi[:,:-1]).real/ncalc
-        mu2 = np.vdot(H_psi[:,:-1], H_psi[:,:-1]).real/ncalc
-        u_mu = np.sqrt(mu2 - mu**2)
-
-        return mu, u_mu/mu
-
     # The initial guess:
     def initial_guess(x):
         sigma = 0.5*R
@@ -137,158 +166,159 @@ def initial():
     psi = elements.make_vector(initial_guess)
     renormalise(psi)
 
-    # Estimate of chemical potential, will be updated throughout simulation:
-    mu = mu_guess
-
-    dt = 1e-7
-    U_K_halfstep, U_K_fullstep = kinetic_evolution_operators(dt)
-
-    # The potential energy evolution operator for the first half timestep in
-    # imaginary time. It is always the same as at the end of timesteps, so we
-    # usually just re-use at the start of each loop. But this being the first
-    # loop we need it now too.
-    density = psi.conj()*density_operator*psi
-    U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
+    # Kinetic energy operator:
+    K = -hbar**2/(2*m)*grad2
 
     i = 0
-    t = 0
-    start_time = time.time()
-    # How often, in timesteps, should we consider adjusting the timstep size?
-    timestep_adjust_period = 1000
+    mucalc, convergence = compute_mu(psi)
     while True:
-        # Evolve for half a step with potential evolution operator:
-        psi = U_V_halfstep*psi
+        # Alternately update even and odd points. This is the 'red black' Gauss Seidel method.
+        if i % 2:
+            points = odd_points
+        else:
+            points = even_points
 
-        # Evolve odd elements for half a step with kinetic energy evolution operator:
-        psi[odd] = np.einsum('ij,nj->ni', U_K_halfstep, psi[odd])
+        # Kinetic energy operator operating on psi at the relevant points:
+        K_psi = np.einsum('ij,nj->ni', K[points, :], psi)
+        # Edges of elements are even points. Add kinetic energy contributions
+        # from either side of an edge if we are currently working on even
+        # points:
+        if points is even_points:
+            K_psi[1:,0] += K_psi[:-1,-1]
+            K_psi[:-1, -1] = K_psi[1:, 0]
+            K_psi[0,0] += K_psi[-1,-1]
+            K_psi[-1, -1] = K_psi[0, 0]
 
-        # Copy odd endpoints -> adjacent even endpoints:
-        psi[even, -1] = psi[odd, 0]
-        psi[even_internal, 0] = psi[odd_internal, -1]
-        psi[0, 0] = psi[-1, -1]
+        # Particle density at the relevant points:
+        density = psi[:, points].conj()*density_operator[points]*psi[:, points]
+        # density = psi.conj()*density_operator*psi
 
-        # Evolve even elements for a full step with kinetic energy evolution operator:
-        psi[even] = np.einsum('ij,nj->ni', U_K_fullstep, psi[even])
+        # Diagonals of the total Hamiltonian operator at the relevant points.
+        # Shape (n_elements x N/2), where N/2 is rounded up to an integer if
+        # we're doing the even points and rounded down if we're doing the odd
+        # points.
+        K_diags = K[points, points].copy()
+        if points is even_points:
+            K_diags[0] *= 2
+            K_diags[-1] *= 2
+        H_diags = K_diags + V[:, points] + g * density
+        H_hollow_psi = K_psi - K_diags*psi[:, points]
 
-        # Copy even endpoints -> adjacent odd endpoints:
-        psi[odd_internal, -1] = psi[even_internal, 0]
-        psi[odd, 0] = psi[even, -1]
-        psi[-1, -1] = psi[0, 0]
-
-        # Evolve odd elements for half a step with kinetic energy evolution operator:
-        psi[odd] = np.einsum('ij,nj->ni', U_K_halfstep, psi[odd])
-
-        # Renormalise:
-        renormalise(psi)
-
-        # Calculate potential energy evolution operator for half a step
-        density = psi.conj()*density_operator*psi
-        U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
-
-        # Evolve for half a timestep with potential evolution operator:
-        psi = U_V_halfstep*psi
-
-        # The below three if statements execute on successive iterations.
-        # They measure the effect of using a larger or smaller timestep,
-        # and adjust it accordingly.
-        if i % timestep_adjust_period == 0:
-            # Assess whether larger or smaller timesteps lead to faster
-            # convergence. First, record how fast energy is going down in one
-            # step with the timestep what it is now:
-            mu, convergence = compute_mu(psi)
-            # Updating this because it depends on mu, which we just
-            # recalculated:
-            U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
-
-        elif i % timestep_adjust_period == 1:
-            # print('testing timestep')
-            # How fast did mu decrease when we left the timestep the same?
-            previous_mu = mu
-            mu, convergence = compute_mu(psi)
-            mu_change_same = mu - previous_mu
-            # Now make it bigger, see what happens:
-            unchanged_timestep = dt
-            dt = unchanged_timestep*2
-            # Recompute evolution matrices:
-            U_K_halfstep, U_K_fullstep = kinetic_evolution_operators(dt)
-            U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
-
-        elif i % timestep_adjust_period == 2:
-            # print('testing bigger timestep')
-            # How fast did mu decrease when we made the timestep bigger?
-            previous_mu = mu
-            mu, convergence = compute_mu(psi)
-            mu_change_bigger = mu - previous_mu
-            # Now make it smaller, see what happens:
-            dt = unchanged_timestep/2
-            # Recompute evolution matrices:
-            U_K_halfstep, U_K_fullstep = kinetic_evolution_operators(dt)
-            U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
-
-        elif i % timestep_adjust_period == 3:
-            # print('testing smaller timestep')
-            # How fast did mu decrease when we made the timestep smaller?
-            previous_mu = mu
-            mu, convergence = compute_mu(psi)
-            mu_change_smaller = mu - previous_mu
-
-            # Which timestep gave us the biggest decrease in mu?
-            best_change = min(mu_change_smaller, mu_change_same, mu_change_bigger)
-            if best_change == mu_change_same:
-                # leave timestep the same as before:
-                dt = unchanged_timestep
-                # print('leaving dt = ', dt)
-            elif best_change == mu_change_smaller:
-                # Smallest timestep is best timestep:
-                dt = unchanged_timestep / 2
-                print('setting dt = ', dt)
-            elif best_change == mu_change_bigger:
-                dt = unchanged_timestep
-                # biggest timestep is best timestep
-                # dt = unchanged_timestep * 2
-                # print('setting dt = ', dt)
-
-            # Recompute evolution matrices:
-            U_K_halfstep, U_K_fullstep = kinetic_evolution_operators(dt)
-            U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
-
-
-
-        if not i % 10000:
-            print((time.time() - start_time)/(i+1)*1e6, 'us per loop')
-            renormalise(psi)
-            plot(i, t, psi)
-            mu, convergence = compute_mu(psi)
-            print('convergence:', convergence)
-            print('mu:', mu)
+        # update the relevant points of psi
+        psi[:, points] = (mu*psi[:, points] - H_hollow_psi)/H_diags
 
         i += 1
-        t += dt
+
+        if not i % 1000:
+            previous_mucalc = mucalc
+            mucalc, convergence = compute_mu(psi)
+            print(i, mu, repr(mucalc), convergence)
+            if abs(mucalc - previous_mucalc) < 1e-14:
+                plot(psi, show=False)
+                break
+        if not i % 10000:
+            plot(psi, show=False)
+
+    return psi
 
 
-def evolution():
-    dt = 2e-8
-    t_final = 30e-3
+def evolution(psi):
 
-    # The potential energy unitary evolution operator for half a timestep,
-    # (n_elements x N). It is a diagonal operator, so the below array is just the
-    # diagonals and is applied by multiplying psi elementwise:
-    U_V_halfstep = np.exp(-1j/hbar * V * dt/2)
+    # Give the condensate a kick:
+    k = 2*pi*5/(10e-6)
+    psi *= np.exp(1j*k*x)
+
+
+    dx_max = np.diff(x[0,:]).max()
+    dx_min = np.diff(x[0,:]).min()
+    dt = dx_max*dx_min*m/(4*pi*hbar)
+    t_final = 100e-3
+
+    n_initial = compute_number(psi)
 
     # The kinetic energy unitary evolution oparators for half a timestep, each is
     # (N x N). Not diagonal, but the same in each element. We need different operators for
     # the first and last elements in order to impose boundary conditions
-    U_K_left_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2_left) * dt/2)
     U_K_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2) * dt/2)
-    U_K_right_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2_right) * dt/2)
     # The same as above but for a full timestep:
-    U_K_left_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2_left) * dt)
     U_K_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2) * dt)
-    U_K_right_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2_right) * dt)
 
+    # The potential energy evolution operator for the first half timestep. It
+    # is always the same as at the end of timesteps, so we usually just re-use
+    # at the start of each loop. But this being the first loop we need it now
+    # too.
+    density = psi.conj()*density_operator*psi
+    U_V_halfstep = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
 
+    i = 0
+    t = 0
+    while t < t_final:
+        # Evolve for half a step with potential evolution operator:
+        psi = U_V_halfstep*psi
 
+        # Evolve odd elements for half a step with kinetic energy evolution operator:
+        psi[odd_elements] = np.einsum('ij,nj->ni', U_K_halfstep, psi[odd_elements])
+
+        # Copy odd endpoints -> adjacent even endpoints:
+        psi[even_elements, -1] = psi[odd_elements, 0]
+        psi[even_internal_elements, 0] = psi[odd_internal_elements, -1]
+        psi[0, 0] = psi[-1, -1]
+
+        # Evolve even elements for a full step with kinetic energy evolution operator:
+        psi[even_elements] = np.einsum('ij,nj->ni', U_K_fullstep, psi[even_elements])
+
+        # Copy even endpoints -> adjacent odd endpoints:
+        psi[odd_internal_elements, -1] = psi[even_internal_elements, 0]
+        psi[odd_elements, 0] = psi[even_elements, -1]
+        psi[-1, -1] = psi[0, 0]
+
+        # Evolve odd elements for half a step with kinetic energy evolution operator:
+        psi[odd_elements] = np.einsum('ij,nj->ni', U_K_halfstep, psi[odd_elements])
+
+        # Copy odd endpoints -> adjacent even endpoints:
+        psi[even_elements, -1] = psi[odd_elements, 0]
+        psi[even_internal_elements, 0] = psi[odd_internal_elements, -1]
+        psi[0, 0] = psi[-1, -1]
+
+        # Calculate potential energy evolution operator for half a step
+        density = psi.conj()*density_operator*psi
+        U_V_halfstep = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
+
+        # Evolve for half a timestep with potential evolution operator:
+        psi = U_V_halfstep*psi
+
+        if not i % 1000:
+            # print(i, t*1e3, 'ms')
+            mucalc, u_mucalc = compute_mu(psi)
+            ncalc = compute_number(psi)
+            print(round(t*1e3), 'ms', ncalc/n_initial)
+        if not i % 50:
+            plot(psi, t, show=False)
+        i += 1
+        t += dt
 
 if __name__ == '__main__':
-    import bprofile
-    initial()
+
+    qapplication = QtGui.QApplication([])
+
+    figure = pl.figure()
+    canvas = FigureCanvas(figure)
+    window = QtGui.QWidget()
+    layout = QtGui.QVBoxLayout(window)
+    navigation_toolbar = NavigationToolbar(canvas, window)
+    layout.addWidget(navigation_toolbar)
+    layout.addWidget(canvas)
+    window.show()
+
+    def run_sims():
+        psi = initial()
+        psi = evolution(psi)
+
+    def start(*args):
+        inthread(run_sims)
+
+    timer = QtCore.QTimer.singleShot(0, start)
+
+    qapplication.exec_()
+
+
