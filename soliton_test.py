@@ -272,7 +272,7 @@ def evolution(psi):
     n_frames = 0
     while True: # t < t_final:
         # Evolve for half a step with potential evolution operator:
-        psi = U_V_halfstep*psi
+        psi[:] = U_V_halfstep*psi
 
         # Evolve odd elements for half a step with kinetic energy evolution operator:
         psi[odd_elements] = np.einsum('ij,nj->ni', U_K_halfstep, psi[odd_elements])
@@ -294,11 +294,11 @@ def evolution(psi):
         psi[odd_elements] = np.einsum('ij,nj->ni', U_K_halfstep, psi[odd_elements])
 
         # Calculate potential energy evolution operator for half a step
-        density = psi.conj()*density_operator*psi
-        U_V_halfstep = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
+        density[:] = psi.conj()*density_operator*psi
+        U_V_halfstep[:] = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
 
         # Evolve for half a timestep with potential evolution operator:
-        psi = U_V_halfstep*psi
+        psi[:] = U_V_halfstep*psi
 
         if not i % 1000:
             # print(i, t*1e3, 'ms')
