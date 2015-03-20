@@ -37,10 +37,9 @@ x_min = -15e-6
 x_max = 15e-6
 
 # Finite elements:
-N = 7
-n_elements = 64
+N = 9
+n_elements = 32
 assert not (n_elements % 2), "Odd-even split step method requires an even number of elements"
-assert (N % 2), "Gauss Seidel checkerboard method requires odd number of basis functions per element"
 
 elements = FiniteElements1D(N, n_elements, x_min, x_max)
 
@@ -53,11 +52,6 @@ odd_elements = ~even_elements
 internal_elements = (0 < element_numbers) & (element_numbers < n_elements - 1)
 odd_internal_elements = odd_elements & internal_elements
 even_internal_elements = even_elements & internal_elements
-
-# Which quadrature points are odd numbered, and which are even?
-point_numbers = np.array(range(N))
-even_points = (point_numbers % 2) == 0
-odd_points = ~even_points
 
 # Second derivative operator, (N x N):
 grad2 = elements.second_derivative_operators()
@@ -154,7 +148,7 @@ def compute_number(psi):
 
 def initial():
 
-    RELAXATION_PARAMETER = 1.5
+    RELAXATION_PARAMETER = 1.7
 
     def renormalise(psi):
         # imposing normalisation on the wavefunction:
@@ -181,53 +175,57 @@ def initial():
 
     i = 0
     mucalc, convergence = compute_mu(psi)
+
+    # An array for selecting which points we are operating on. For the SOR
+    # method, we update all elements simultaneously, one basis function at a
+    # time, except for the endpoints which we do simultaneously.
+    pointslist = np.zeros((N-1, N), dtype=bool)
+    for j in range(N-1):
+        pointslist[j,j] = True
+    pointslist[0,N-1] = True
+
     while True:
-        # Alternately update even and odd points. This is the 'red black' Gauss Seidel method.
-        if i % 2:
-            points = odd_points
-        else:
-            points = even_points
+        for j in range(N-1):
+            points = pointslist[j]
 
-        # Kinetic energy operator operating on psi at the relevant points:
-        K_psi = np.einsum('ij,nj->ni', K[points, :], psi)
-        # Edges of elements are even points. Add kinetic energy contributions
-        # from either side of an edge if we are currently working on even
-        # points:
-        if points is even_points:
-            K_psi[1:,0] += K_psi[:-1,-1]
-            K_psi[:-1, -1] = K_psi[1:, 0]
-            K_psi[0,0] += K_psi[-1,-1]
-            K_psi[-1, -1] = K_psi[0, 0]
+            # Kinetic energy operator operating on psi at the relevant points:
+            K_psi = np.einsum('ij,nj->ni', K[points, :], psi)
+            # Add kinetic energy contributions from either side of an edge if we
+            # are currently working on endpoints
+            if j == 0:
+                K_psi[1:,0] += K_psi[:-1,-1]
+                K_psi[:-1, -1] = K_psi[1:, 0]
+                K_psi[0,0] += K_psi[-1,-1]
+                K_psi[-1, -1] = K_psi[0, 0]
 
-        # Particle density at the relevant points:
-        density = psi[:, points].conj()*density_operator[points]*psi[:, points]
-        # density = psi.conj()*density_operator*psi
+            # Particle density at the relevant points:
+            density = psi[:, points].conj()*density_operator[points]*psi[:, points]
+            # density = psi.conj()*density_operator*psi
 
-        # Diagonals of the total Hamiltonian operator at the relevant points.
-        # Shape (n_elements x N/2), where N/2 is rounded up to an integer if
-        # we're doing the even points and rounded down if we're doing the odd
-        # points.
-        K_diags = K[points, points].copy()
-        if points is even_points:
-            K_diags[0] *= 2
-            K_diags[-1] *= 2
-        H_diags = K_diags + V[:, points] + g * density
-        H_hollow_psi = K_psi - K_diags*psi[:, points]
+            # Diagonals of the total Hamiltonian operator at the relevant points.
+            # Shape (n_elements x N/2), where N/2 is rounded up to an integer if
+            # we're doing the even points and rounded down if we're doing the odd
+            # points.
+            K_diags = K[points, points].copy()
+            if j == 0:
+                K_diags[0] *= 2
+                K_diags[-1] *= 2
+            H_diags = K_diags + V[:, points] + g * density
+            H_hollow_psi = K_psi - K_diags*psi[:, points]
 
-        # The Gauss-Seidel prediction for the new psi:
-        psi_new_GS = (mu*psi[:, points] - H_hollow_psi)/H_diags
+            # The Gauss-Seidel prediction for the new psi:
+            psi_new_GS = (mu*psi[:, points] - H_hollow_psi)/H_diags
 
-        # update the relevant points of psi
-        psi[:, points] += RELAXATION_PARAMETER*(psi_new_GS - psi[:, points])
+            # update the relevant points of psi
+            psi[:, points] += RELAXATION_PARAMETER*(psi_new_GS - psi[:, points])
 
         i += 1
 
         if not i % 1000:
-            previous_mucalc = mucalc
-            mucalc, convergence = compute_mu(psi)
-            change = abs((mucalc - previous_mucalc)/previous_mucalc)
-            print(i, mu, repr(mucalc), convergence, change)
-            if change < 1e-14:
+            mucalc, u_mucalc = compute_mu(psi)
+            convergence = abs((mucalc - mu)/mu)
+            print(i, convergence)
+            if convergence < 1e-14:
                 plot(psi, show=False)
                 break
         if not i % 100:
