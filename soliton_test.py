@@ -5,15 +5,10 @@ import pylab as pl
 from scipy.linalg import expm
 from FEDVR import FiniteElements1D
 
-import matplotlib
-matplotlib.use("QT4Agg")
-from matplotlib.backends.backend_qt4agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qt4agg import NavigationToolbar2QT as NavigationToolbar
-
 from PyQt4 import QtCore, QtGui
 from qtutils import inthread, inmain_decorator
 
-
+import pyqtgraph as pg
 
 def get_number_and_trap(rho_max, R):
     """Return the 1D normalisation constant N (units of atoms per unit area)
@@ -43,7 +38,7 @@ x_max = 15e-6
 
 # Finite elements:
 N = 7
-n_elements = 50
+n_elements = 64
 assert not (n_elements % 2), "Odd-even split step method requires an even number of elements"
 assert (N % 2), "Gauss Seidel checkerboard method requires odd number of basis functions per element"
 
@@ -79,30 +74,43 @@ V = 0.5*m*omega**2*x**2
 
 @inmain_decorator()
 def plot(psi, t=None, show=False):
+    global abs_curve, pot_curve, tf_curve
+
     x_plot, values = elements.get_values(psi)
-    psi_tf = rho_max*(1 - x_plot**2/R**2)
-    psi_tf = np.sqrt(np.clip(psi_tf, 0, None))
+    V_plot = V.flatten()/g
 
-    if not figure.axes:
-        pl.title('BEC in a trap')
-        pl.xlabel('$x\ (\mu\mathrm{m})$')
-        pl.ylabel('wavefunction real and imaginary parts')
-        pl.axis([-15,15,-2e10,2e10])
-    pl.gca().lines = []
+    if abs_curve is None:
+        psi_tf = rho_max*(1 - x_plot**2/R**2)
+        psi_tf = np.clip(psi_tf, 0, None)
+        tf_curve = plot_window.plot(x_plot*1e6, np.abs(values)**2, pen='y')
+        abs_curve = plot_window.plot(x_plot*1e6, np.abs(values)**2 + V_plot, pen='w')
+        pot_curve = plot_window.plot(x_plot*1e6, V_plot, pen='g')
+        plot_window.showGrid(True, True)
+        plot_window.setXRange(-15, 15)
+        plot_window.setYRange(0, 6e20)
+    else:
+        abs_curve.setData(x_plot*1e6, np.abs(values)**2 + V_plot, pen='w')
+        tf_curve.setData(x_plot*1e6, np.abs(values)**2, pen='y')
 
-    pl.plot(x_plot*1e6, psi_tf, 'k-')
-    pl.plot(x_plot*1e6, values.real, 'b-')
-    pl.plot(x_plot*1e6, values.imag, 'g-')
-    pl.grid(True)
+    # plot2(psi, t, show)
+    # if not figure.axes:
+    #     pl.title('BEC in a trap')
+    #     pl.xlabel('$x\ (\mu\mathrm{m})$')
+    #     pl.ylabel('wavefunction real and imaginary parts')
+    #     pl.axis([-15,15,-2e10,2e10])
+
+    # pl.plot(x_plot*1e6, values.real, 'b-')
+    # pl.plot(x_plot*1e6, values.imag, 'g-')
+    # pl.grid(True)
 
 
-    figure.texts = []
-    if t is not None:
-        pl.figtext(0.15, 0.125, r'$t=%.00f\,\mathrm{ms}$'%(t*1e3))
-    # pl.savefig('output.png')
-    canvas.draw_idle()
-    if show:
-        pl.show()
+    # figure.texts = []
+    # if t is not None:
+    #     pl.figtext(0.15, 0.125, r'$t=%.00f\,\mathrm{ms}$'%(t*1e3))
+    # # pl.savefig('output.png')
+    # canvas.draw_idle()
+    # if show:
+    #     pl.show()
 
 
 def compute_mu(psi):
@@ -145,6 +153,8 @@ def compute_number(psi):
 
 
 def initial():
+
+    RELAXATION_PARAMETER = 1.5
 
     def renormalise(psi):
         # imposing normalisation on the wavefunction:
@@ -204,25 +214,31 @@ def initial():
         H_diags = K_diags + V[:, points] + g * density
         H_hollow_psi = K_psi - K_diags*psi[:, points]
 
+        # The Gauss-Seidel prediction for the new psi:
+        psi_new_GS = (mu*psi[:, points] - H_hollow_psi)/H_diags
+
         # update the relevant points of psi
-        psi[:, points] = (mu*psi[:, points] - H_hollow_psi)/H_diags
+        psi[:, points] += RELAXATION_PARAMETER*(psi_new_GS - psi[:, points])
 
         i += 1
 
         if not i % 1000:
             previous_mucalc = mucalc
             mucalc, convergence = compute_mu(psi)
-            print(i, mu, repr(mucalc), convergence)
-            if abs(mucalc - previous_mucalc) < 1e-14:
+            change = abs((mucalc - previous_mucalc)/previous_mucalc)
+            print(i, mu, repr(mucalc), convergence, change)
+            if change < 1e-14:
                 plot(psi, show=False)
                 break
-        if not i % 10000:
+        if not i % 100:
             plot(psi, show=False)
 
     return psi
 
 
 def evolution(psi):
+
+    global time_of_last_plot
 
     # Give the condensate a kick:
     k = 2*pi*5/(10e-6)
@@ -231,10 +247,11 @@ def evolution(psi):
 
     dx_max = np.diff(x[0,:]).max()
     dx_min = np.diff(x[0,:]).min()
-    dt = dx_max*dx_min*m/(4*pi*hbar)
+    dt = dx_max*dx_min*m/(8*pi*hbar)
     t_final = 100e-3
 
     n_initial = compute_number(psi)
+    mu_initial, unc_mu_inintial = compute_mu(psi)
 
     # The kinetic energy unitary evolution oparators for half a timestep, each is
     # (N x N). Not diagonal, but the same in each element. We need different operators for
@@ -252,7 +269,10 @@ def evolution(psi):
 
     i = 0
     t = 0
-    while t < t_final:
+
+    start_time = time.time()
+    n_frames = 0
+    while True: # t < t_final:
         # Evolve for half a step with potential evolution operator:
         psi = U_V_halfstep*psi
 
@@ -275,11 +295,6 @@ def evolution(psi):
         # Evolve odd elements for half a step with kinetic energy evolution operator:
         psi[odd_elements] = np.einsum('ij,nj->ni', U_K_halfstep, psi[odd_elements])
 
-        # Copy odd endpoints -> adjacent even endpoints:
-        psi[even_elements, -1] = psi[odd_elements, 0]
-        psi[even_internal_elements, 0] = psi[odd_internal_elements, -1]
-        psi[0, 0] = psi[-1, -1]
-
         # Calculate potential energy evolution operator for half a step
         density = psi.conj()*density_operator*psi
         U_V_halfstep = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
@@ -291,34 +306,42 @@ def evolution(psi):
             # print(i, t*1e3, 'ms')
             mucalc, u_mucalc = compute_mu(psi)
             ncalc = compute_number(psi)
-            print(round(t*1e3), 'ms', ncalc/n_initial)
-        if not i % 50:
+            step_rate = (i+1)/(time.time() - start_time)
+            frame_rate = n_frames/(time.time() - start_time)
+            print(round(t*1e3), 'ms',
+                  round(np.log10(abs(ncalc/n_initial-1))),
+                  round(np.log10(abs(mucalc/mu_initial-1))),
+                  round(1e6/step_rate, 1), 'usps',
+                  round(frame_rate, 1), 'fps')
+        if (time.time() - time_of_last_plot) > 1/target_frame_rate:
+
+            # Copy odd endpoints -> adjacent even endpoints:
+            psi[even_elements, -1] = psi[odd_elements, 0]
+            psi[even_internal_elements, 0] = psi[odd_internal_elements, -1]
+            psi[0, 0] = psi[-1, -1]
+
             plot(psi, t, show=False)
+            n_frames += 1
+            time_of_last_plot = time.time()
         i += 1
         t += dt
 
 if __name__ == '__main__':
 
-    qapplication = QtGui.QApplication([])
+    time_of_last_plot = time.time()
+    target_frame_rate = 20
 
-    figure = pl.figure()
-    canvas = FigureCanvas(figure)
-    window = QtGui.QWidget()
-    layout = QtGui.QVBoxLayout(window)
-    navigation_toolbar = NavigationToolbar(canvas, window)
-    layout.addWidget(navigation_toolbar)
-    layout.addWidget(canvas)
-    window.show()
+    plot_window = pg.PlotWindow()
+    abs_curve = None
+    pot_curve = None
+    tf_curve = None
 
     def run_sims():
         psi = initial()
         psi = evolution(psi)
 
-    def start(*args):
-        inthread(run_sims)
-
-    timer = QtCore.QTimer.singleShot(0, start)
-
-    qapplication.exec_()
+    # run_sims()
+    inthread(run_sims)
+    QtGui.QApplication.instance().exec_()
 
 
