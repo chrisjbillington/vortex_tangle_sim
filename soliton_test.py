@@ -37,8 +37,8 @@ x_min = -15e-6
 x_max = 15e-6
 
 # Finite elements:
-N = 9
-n_elements = 32
+N = 7
+n_elements = 64
 assert not (n_elements % 2), "Odd-even split step method requires an even number of elements"
 
 elements = FiniteElements1D(N, n_elements, x_min, x_max)
@@ -66,6 +66,15 @@ x = elements.points
 # The Harmonic trap at our gridpoints, (n_elements x N):
 V = 0.5*m*omega**2*x**2
 
+def dark_soliton(x, x_sol, rho, v):
+    healing_length = hbar/np.sqrt(2*m*rho*g)
+    v_sound = np.sqrt(rho*g/m)
+    soliton_width = healing_length/np.sqrt(1 - v**2/v_sound**2)
+    soliton_envelope = (1j*v/v_sound +
+                        np.sqrt(1 + v**2/v_sound**2) *
+                        np.tanh((x - x_sol)/(np.sqrt(2)*soliton_width)))
+    return soliton_envelope
+
 @inmain_decorator()
 def plot(psi, t=None, show=False):
     global abs_curve, pot_curve, tf_curve
@@ -85,26 +94,6 @@ def plot(psi, t=None, show=False):
     else:
         abs_curve.setData(x_plot*1e6, np.abs(values)**2 + V_plot, pen='w')
         tf_curve.setData(x_plot*1e6, np.abs(values)**2, pen='y')
-
-    # plot2(psi, t, show)
-    # if not figure.axes:
-    #     pl.title('BEC in a trap')
-    #     pl.xlabel('$x\ (\mu\mathrm{m})$')
-    #     pl.ylabel('wavefunction real and imaginary parts')
-    #     pl.axis([-15,15,-2e10,2e10])
-
-    # pl.plot(x_plot*1e6, values.real, 'b-')
-    # pl.plot(x_plot*1e6, values.imag, 'g-')
-    # pl.grid(True)
-
-
-    # figure.texts = []
-    # if t is not None:
-    #     pl.figtext(0.15, 0.125, r'$t=%.00f\,\mathrm{ms}$'%(t*1e3))
-    # # pl.savefig('output.png')
-    # canvas.draw_idle()
-    # if show:
-    #     pl.show()
 
 
 def compute_mu(psi):
@@ -148,7 +137,7 @@ def compute_number(psi):
 
 def initial():
 
-    RELAXATION_PARAMETER = 1.7
+    RELAXATION_PARAMETER = 1.4
 
     def renormalise(psi):
         # imposing normalisation on the wavefunction:
@@ -238,9 +227,10 @@ def evolution(psi):
 
     global time_of_last_plot
 
-    # Give the condensate a kick:
-    k = 2*pi*5/(10e-6)
-    psi *= np.exp(1j*k*x)
+    dx_max = np.diff(x[0,:]).max()
+    dx_min = np.diff(x[0,:]).min()
+    dt = dx_max*dx_min*m/(8*pi*hbar)
+    t_final = 1e-3
 
 
     dx_max = np.diff(x[0,:]).max()
@@ -262,7 +252,7 @@ def evolution(psi):
     # is always the same as at the end of timesteps, so we usually just re-use
     # at the start of each loop. But this being the first loop we need it now
     # too.
-    density = psi.conj()*density_operator*psi
+    density = (psi.conj()*density_operator*psi).real
     U_V_halfstep = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
 
     i = 0
@@ -294,7 +284,7 @@ def evolution(psi):
         psi[odd_elements] = np.einsum('ij,nj->ni', U_K_halfstep, psi[odd_elements])
 
         # Calculate potential energy evolution operator for half a step
-        density[:] = psi.conj()*density_operator*psi
+        density[:] = (psi.conj()*density_operator*psi).real
         U_V_halfstep[:] = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
 
         # Evolve for half a timestep with potential evolution operator:
@@ -323,6 +313,7 @@ def evolution(psi):
             time_of_last_plot = time.time()
         i += 1
         t += dt
+    return psi
 
 if __name__ == '__main__':
 
@@ -336,6 +327,20 @@ if __name__ == '__main__':
 
     def run_sims():
         psi = initial()
+
+        k = 2*pi*5/(10e-6)
+        # Give the condensate a kick:
+        # psi *= np.exp(1j*k*x)
+
+        # print a soliton onto the condensate:
+        density = (psi.conj()*density_operator*psi).real
+        x_soliton = 5e-6
+        rho_bg = density[np.abs(x-x_soliton)==np.abs(x-x_soliton).min()]
+        v_soliton = 0#hbar*k/m
+        soliton_envelope = dark_soliton(x, x_soliton, rho_bg, v_soliton)
+        psi *= soliton_envelope
+
+        # psi = imaginary_evolution(psi)
         psi = evolution(psi)
 
     # run_sims()
