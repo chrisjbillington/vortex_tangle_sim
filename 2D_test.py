@@ -156,7 +156,7 @@ def compute_number(psi):
 
 def initial():
 
-    RELAXATION_PARAMETER = 1.6
+    RELAXATION_PARAMETER = 1.7
 
     def renormalise(psi):
         # imposing normalisation on the wavefunction:
@@ -197,36 +197,66 @@ def initial():
     Kx_psi = np.einsum('ij,xyjl->xyil', Kx,  psi)
     Ky_psi = np.einsum('kl,xyjl->xyjk', Ky,  psi)
 
+    j_indices = np.array(range(Nx))[:, np.newaxis]*np.ones(Ny)[np.newaxis, :]
+    k_indices = np.array(range(Ny))[np.newaxis, :]*np.ones(Ny)[:, np.newaxis]
+    edges = (j_indices == 0) | (k_indices == 0) | (j_indices == Nx - 1) | (k_indices == Ny - 1)
+
+    # Each loop we first update the edges of each element, then we loop
+    # over the internal basis points. Here we just create the list of
+    # indices we iterate over:
+    points_and_indices = []
+    points_and_indices.append((edges, 0, 0))
+    for j in range(1, Nx-1):
+        for k in range(1, Ny-1):
+            points_and_indices.append(((j, k), j, k))
+    start_time = time.time()
     while True:
         # We operate on all elements at once, but one DVR basis function at a time.
-        for j in range(Nx):
-            for k in range(Ny):
+        # However, we do all edge points simultaneously:
+        Kx_psi[:, :, (0, -1), :] = np.einsum('ij,xyjl->xyil', Kx[(0, -1), :],  psi)
+        Kx_psi[:, :, :, (0, -1)] = np.einsum('ij,xyjl->xyil', Kx,  psi[:, :, :, (0, -1)])
+        Ky_psi[:, :, (0, -1), :] = np.einsum('kl,xyjl->xyjk', Ky,  psi[:, :, (0, -1), :])
+        Ky_psi[:, :, :, (0, -1)] = np.einsum('kl,xyjl->xyjk', Ky[(0, -1), :],  psi)
+
+        # Add contributions from left to right across edges:
+        Kx_psi[1:, :, 0, :] += Kx_psi[:-1, :, -1, :]
+        Kx_psi[0, :, 0, :] += Kx_psi[-1, :, -1, :] # Periodic boundary conditions
+
+        # Copy summed values back from right to left across edges:
+        Kx_psi[:-1, :, -1, :] = Kx_psi[1:, :, 0, :]
+        Kx_psi[-1, :, -1, :] = Kx_psi[0, :, 0, :]  # Periodic boundary conditions
+
+        # Add contributions from top to bottom across edges:
+        Ky_psi[:, 1:, :, 0] += Ky_psi[:, :-1, :, -1]
+        Ky_psi[:, 0, :, 0] += Ky_psi[:, -1, :, -1] # Periodic boundary conditions
+
+        # Copy summed values back from bottom to top across edges:
+        Ky_psi[:, :-1, :, -1] = Ky_psi[:, 1:, :, 0]
+        Ky_psi[:, -1, :, -1] = Ky_psi[:, 0, :, 0] # Periodic boundary conditions
+
+        # Total kinetic energy operator operating on psi:
+        K_psi = Kx_psi[:, :, edges] + Ky_psi[:, :, edges]
+
+        density = psi[:, :, edges].conj() * density_operator[edges] * psi[:, :, edges]
+
+        # Diagonals of the total Hamiltonian operator at this DVR point:
+        H_diags = K_diags[edges] + V[:, :, edges] + g * density
+        # Hamiltonian with diagonals subtracted off, operating on psi:
+        H_hollow_psi = K_psi - K_diags[edges] * psi[:, :, edges]
+
+        # The Gauss-Seidel prediction for the new psi:
+        psi_new_GS = (mu * psi[:, :, edges] - H_hollow_psi)/H_diags
+
+        # update the relevant points of psi
+        psi[:, :, edges] += RELAXATION_PARAMETER * (psi_new_GS - psi[:, :, edges])
+
+        for j in range(1, Nx-1):
+            for k in range(1, Ny-1):
                 Kx_psi[:, :, j, k] = np.einsum('j,xyj->xy', Kx[j, :],  psi[:, :, :, k])
                 Ky_psi[:, :, j, k] = np.einsum('l,xyl->xy', Ky[k, :],  psi[:, :, j, :])
 
                 # The kinetic energy term at this DVR point:
                 K_psi = Kx_psi[:, :, j, k] + Ky_psi[:, :, j, k]
-
-                if j == 0:
-                    # Include contribution to the kinetic energy at this edge
-                    # from the element to the left:
-                    K_psi[1:, :] += Kx_psi[:-1, :, -1, k]
-                    K_psi[0, :] += Kx_psi[-1, :, - 1, k] # periodic boundary conditions
-                elif j == Nx - 1:
-                    # Include contribution to the kinetic energy at this edge
-                    # point from the element to the right:
-                    K_psi[:-1, :] += Kx_psi[1:, :, 0, k]
-                    K_psi[-1, :] += Kx_psi[0, :, 0, k] # periodic boundary conditions
-                if k == 0:
-                    # Include contribution to the kinetic energy at this edge
-                    # from the element above:
-                    K_psi[:, 1:] += Ky_psi[:, :-1, j, -1]
-                    K_psi[:, 0] += Ky_psi[:, -1, j, -1] # periodic boundary conditions
-                elif k == Ny - 1:
-                    # Include contribution to the kinetic energy at this edge
-                    # point from the element below:
-                    K_psi[:, :-1] += Ky_psi[:, 1:, j, 0]
-                    K_psi[:, -1] += Ky_psi[:, 0, j, 0] # periodic boundary conditions
 
                 # Particle density at this DVR point:
                 density = psi[:, :, j, k].conj() * density_operator[j, k] * psi[:, :, j, k]
@@ -242,17 +272,17 @@ def initial():
                 # update the relevant points of psi
                 psi[:, :, j, k] += RELAXATION_PARAMETER * (psi_new_GS - psi[:, :, j, k])
 
-            i += 1
+        i += 1
 
-            if not i % 100:
-                mucalc, u_mucalc = compute_mu(psi)
-                convergence = abs((mucalc - mu)/mu)
-                print(i, mu, mucalc, convergence)
-                if convergence < 1e-13:
-                    plot(psi, show=False)
-                    break
-            if not i % 100:
+        if not i % 100:
+            mucalc, u_mucalc = compute_mu(psi)
+            convergence = abs((mucalc - mu)/mu)
+            print(i, mu, mucalc, convergence, 1e3*(time.time() - start_time)/i, 'msps')
+            if convergence < 1e-13:
                 plot(psi, show=False)
+                break
+        if not i % 100:
+            plot(psi, show=False)
 
     return psi
 
@@ -379,8 +409,8 @@ if __name__ == '__main__':
         # # psi = imaginary_evolution(psi)
         # psi = evolution(psi)
 
-    # run_sims()
-    inthread(run_sims)
+    run_sims()
+    # inthread(run_sims)
     qapplication.exec_()
 
 
