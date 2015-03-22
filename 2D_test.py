@@ -205,72 +205,60 @@ def initial():
     # over the internal basis points. Here we just create the list of
     # indices we iterate over:
     points_and_indices = []
-    points_and_indices.append((edges, 0, 0))
+    points_and_indices.append((edges, None, None))
     for j in range(1, Nx-1):
         for k in range(1, Ny-1):
-            points_and_indices.append(((j, k), j, k))
+            points_and_indices.append(((j_indices == j) & (k_indices == k), j, k))
+
     start_time = time.time()
     while True:
         # We operate on all elements at once, but one DVR basis function at a time.
-        # However, we do all edge points simultaneously:
-        Kx_psi[:, :, (0, -1), :] = np.einsum('ij,xyjl->xyil', Kx[(0, -1), :],  psi)
-        Kx_psi[:, :, :, (0, -1)] = np.einsum('ij,xyjl->xyil', Kx,  psi[:, :, :, (0, -1)])
-        Ky_psi[:, :, (0, -1), :] = np.einsum('kl,xyjl->xyjk', Ky,  psi[:, :, (0, -1), :])
-        Ky_psi[:, :, :, (0, -1)] = np.einsum('kl,xyjl->xyjk', Ky[(0, -1), :],  psi)
+        for points, j, k, in points_and_indices:
+            if points is edges:
+                # I lied about doing one basis function at a time.  We do all
+                # the edge points simultaneously:
+                Kx_psi[:, :, (0, -1), :] = np.einsum('ij,xyjl->xyil', Kx[(0, -1), :],  psi)
+                Kx_psi[:, :, :, (0, -1)] = np.einsum('ij,xyjl->xyil', Kx,  psi[:, :, :, (0, -1)])
+                Ky_psi[:, :, (0, -1), :] = np.einsum('kl,xyjl->xyjk', Ky,  psi[:, :, (0, -1), :])
+                Ky_psi[:, :, :, (0, -1)] = np.einsum('kl,xyjl->xyjk', Ky[(0, -1), :],  psi)
 
-        # Add contributions from left to right across edges:
-        Kx_psi[1:, :, 0, :] += Kx_psi[:-1, :, -1, :]
-        Kx_psi[0, :, 0, :] += Kx_psi[-1, :, -1, :] # Periodic boundary conditions
+                # Add contributions from left to right across edges:
+                Kx_psi[1:, :, 0, :] += Kx_psi[:-1, :, -1, :]
+                Kx_psi[0, :, 0, :] += Kx_psi[-1, :, -1, :] # Periodic boundary conditions
 
-        # Copy summed values back from right to left across edges:
-        Kx_psi[:-1, :, -1, :] = Kx_psi[1:, :, 0, :]
-        Kx_psi[-1, :, -1, :] = Kx_psi[0, :, 0, :]  # Periodic boundary conditions
+                # Copy summed values back from right to left across edges:
+                Kx_psi[:-1, :, -1, :] = Kx_psi[1:, :, 0, :]
+                Kx_psi[-1, :, -1, :] = Kx_psi[0, :, 0, :]  # Periodic boundary conditions
 
-        # Add contributions from top to bottom across edges:
-        Ky_psi[:, 1:, :, 0] += Ky_psi[:, :-1, :, -1]
-        Ky_psi[:, 0, :, 0] += Ky_psi[:, -1, :, -1] # Periodic boundary conditions
+                # Add contributions from top to bottom across edges:
+                Ky_psi[:, 1:, :, 0] += Ky_psi[:, :-1, :, -1]
+                Ky_psi[:, 0, :, 0] += Ky_psi[:, -1, :, -1] # Periodic boundary conditions
 
-        # Copy summed values back from bottom to top across edges:
-        Ky_psi[:, :-1, :, -1] = Ky_psi[:, 1:, :, 0]
-        Ky_psi[:, -1, :, -1] = Ky_psi[:, 0, :, 0] # Periodic boundary conditions
-
-        # Total kinetic energy operator operating on psi:
-        K_psi = Kx_psi[:, :, edges] + Ky_psi[:, :, edges]
-
-        density = psi[:, :, edges].conj() * density_operator[edges] * psi[:, :, edges]
-
-        # Diagonals of the total Hamiltonian operator at this DVR point:
-        H_diags = K_diags[edges] + V[:, :, edges] + g * density
-        # Hamiltonian with diagonals subtracted off, operating on psi:
-        H_hollow_psi = K_psi - K_diags[edges] * psi[:, :, edges]
-
-        # The Gauss-Seidel prediction for the new psi:
-        psi_new_GS = (mu * psi[:, :, edges] - H_hollow_psi)/H_diags
-
-        # update the relevant points of psi
-        psi[:, :, edges] += RELAXATION_PARAMETER * (psi_new_GS - psi[:, :, edges])
-
-        for j in range(1, Nx-1):
-            for k in range(1, Ny-1):
+                # Copy summed values back from bottom to top across edges:
+                Ky_psi[:, :-1, :, -1] = Ky_psi[:, 1:, :, 0]
+                Ky_psi[:, -1, :, -1] = Ky_psi[:, 0, :, 0] # Periodic boundary conditions
+            else:
+                # Internal DVR points we actually do do one at a time:
                 Kx_psi[:, :, j, k] = np.einsum('j,xyj->xy', Kx[j, :],  psi[:, :, :, k])
                 Ky_psi[:, :, j, k] = np.einsum('l,xyl->xy', Ky[k, :],  psi[:, :, j, :])
 
-                # The kinetic energy term at this DVR point:
-                K_psi = Kx_psi[:, :, j, k] + Ky_psi[:, :, j, k]
+            # Total kinetic energy operator operating on psi at the DVR point(s):
+            K_psi = Kx_psi[:, :, points] + Ky_psi[:, :, points]
 
-                # Particle density at this DVR point:
-                density = psi[:, :, j, k].conj() * density_operator[j, k] * psi[:, :, j, k]
+            # Density at the DVR point(s):
+            density = psi[:, :, points].conj() * density_operator[points] * psi[:, :, points]
 
-                # Diagonals of the total Hamiltonian operator at this DVR point:
-                H_diags = K_diags[j, k] + V[:, :, j, k] + g * density
-                # Hamiltonian with diagonals subtracted off, operating on psi:
-                H_hollow_psi = K_psi - K_diags[j, k] * psi[:, :, j, k]
+            # Diagonals of the total Hamiltonian operator at the DVR point(s):
+            H_diags = K_diags[points] + V[:, :, points] + g * density
 
-                # The Gauss-Seidel prediction for the new psi:
-                psi_new_GS = (mu * psi[:, :, j, k] - H_hollow_psi)/H_diags
+            # Hamiltonian with diagonals subtracted off, operating on psi at the DVR point(s):
+            H_hollow_psi = K_psi - K_diags[points] * psi[:, :, points]
 
-                # update the relevant points of psi
-                psi[:, :, j, k] += RELAXATION_PARAMETER * (psi_new_GS - psi[:, :, j, k])
+            # The Gauss-Seidel prediction for the new psi at the DVR point(s):
+            psi_new_GS = (mu * psi[:, :, points] - H_hollow_psi)/H_diags
+
+            # Update psi at the DVR point(s) with overrelaxation:
+            psi[:, :, points] += RELAXATION_PARAMETER * (psi_new_GS - psi[:, :, points])
 
         i += 1
 
