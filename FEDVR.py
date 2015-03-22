@@ -322,12 +322,12 @@ class FiniteElements2D(object):
         # The same for the y direction:
         self.points_y = self.element_y.points + self.element_edges_y[:-1, np.newaxis]
 
-        # The above two arrays, each broadcast into an extra two dimensions
-        # forming an array with shape (self.n_elements_x x self.n_elements_y x
-        # self.Nx x self.Ny), like meshgrid does.
         self.shape = (self.n_elements_x, self.n_elements_y, self.Nx, self.Ny)
-        self.points_X = self.points_x[:, np.newaxis, :, np.newaxis] * np.ones(self.shape)
-        self.points_Y = self.points_y[np.newaxis, :, np.newaxis, :] * np.ones(self.shape)
+
+        # The above two arrays, each with extra axes inserted so that arithmetic operations
+        # on the two will return 4D arrays of shape self.shape:
+        self.points_X = self.points_x[:, np.newaxis, :, np.newaxis]
+        self.points_Y = self.points_y[np.newaxis, :, np.newaxis, :]
 
         # The weights are identical in each element so we only need a length
         # self.Nx array and a self.Ny array:

@@ -191,10 +191,10 @@ def initial():
             density = psi[:, points].conj()*density_operator[points]*psi[:, points]
             # density = psi.conj()*density_operator*psi
 
-            # Diagonals of the total Hamiltonian operator at the relevant points.
-            # Shape (n_elements x N/2), where N/2 is rounded up to an integer if
-            # we're doing the even points and rounded down if we're doing the odd
-            # points.
+            # Diagonals of the total Hamiltonian operator at the relevant
+            # points. Shape (n_elements x n_points), where n_points is however
+            # many points we're operating on at the moment (usually one, more
+            # if we are doing endpoints):
             K_diags = K[points, points].copy()
             if j == 0:
                 K_diags[0] *= 2
