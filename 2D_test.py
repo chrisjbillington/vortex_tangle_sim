@@ -174,7 +174,7 @@ def initial():
 
     psi = elements.make_vector(initial_guess)
     renormalise(psi)
-    plot(psi)
+    # plot(psi)
 
     # Kinetic energy operators:
     Kx = -hbar**2/(2*m)*grad2x
@@ -192,88 +192,67 @@ def initial():
     i = 0
     mucalc, convergence = compute_mu(psi)
 
-    # An array for selecting which points we are operating on. For the SOR
-    # method, we update all elements simultaneously, one basis function at a
-    # time, except for the endpoints which we do simultaneously.
-    pointslist = np.zeros((((Nx - 2) * (Ny - 2)) + 1, Nx, Ny), dtype=bool)
-    indices = np.zeros((((Nx - 2) * (Ny - 2)) + 1, 2), dtype=int)
-    for j in range(1, Nx - 1):
-        for k in range(1, Ny - 1):
-            pointslist_index = (j - 1)*(Ny-2) + k
-            pointslist[pointslist_index, j, k] = True
-            indices[pointslist_index] = j, k
-    pointslist[0, Nx-1, :] = True
-    pointslist[0, :, Ny-1] = True
-    pointslist[0, 0, :] = True
-    pointslist[0, :, 0] = True
-    indices[0] = 0,0
+    # Arrays for storing the x and y kinetic energy terms,
+    # which are needed by neighboring points
+    Kx_psi = np.einsum('ij,xyjl->xyil', Kx,  psi)
+    Ky_psi = np.einsum('kl,xyjl->xyjk', Ky,  psi)
 
     while True:
-        for (j, k), points in zip(indices, pointslist):
-            x_points = points[:, k]
-            y_points = points[j, :]
-            # x kinetic energy operator operating on psi.
-            Kx_psi = np.einsum('ij,xyjl->xyil', Kx[x_points, :],  psi[:, :, :, y_points])
+        # We operate on all elements at once, but one DVR basis function at a time.
+        for j in range(Nx):
+            for k in range(Ny):
+                Kx_psi[:, :, j, k] = np.einsum('j,xyj->xy', Kx[j, :],  psi[:, :, :, k])
+                Ky_psi[:, :, j, k] = np.einsum('l,xyl->xy', Ky[k, :],  psi[:, :, j, :])
 
-            if j == 0: # If we are currently working on x edgepoints:
-                # Add contributions from left to right across edges:
-                Kx_psi[1:, :, 0, :] += Kx_psi[:-1, :, -1, :]
-                Kx_psi[0, :, 0, :] += Kx_psi[-1, :, -1, :] # Periodic boundary conditions
+                # The kinetic energy term at this DVR point:
+                K_psi = Kx_psi[:, :, j, k] + Ky_psi[:, :, j, k]
 
-                # Copy summed values back from right to left across edges:
-                Kx_psi[:-1, :, -1, :] = Kx_psi[1:, :, 0, :]
-                Kx_psi[-1, :, -1, :] = Kx_psi[0, :, 0, :]  # Periodic boundary conditions
+                if j == 0:
+                    # Include contribution to the kinetic energy at this edge
+                    # from the element to the left:
+                    K_psi[1:, :] += Kx_psi[:-1, :, -1, k]
+                    K_psi[0, :] += Kx_psi[-1, :, - 1, k] # periodic boundary conditions
+                elif j == Nx - 1:
+                    # Include contribution to the kinetic energy at this edge
+                    # point from the element to the right:
+                    K_psi[:-1, :] += Kx_psi[1:, :, 0, k]
+                    K_psi[-1, :] += Kx_psi[0, :, 0, k] # periodic boundary conditions
+                if k == 0:
+                    # Include contribution to the kinetic energy at this edge
+                    # from the element above:
+                    K_psi[:, 1:] += Ky_psi[:, :-1, j, -1]
+                    K_psi[:, 0] += Ky_psi[:, -1, j, -1] # periodic boundary conditions
+                elif k == Ny - 1:
+                    # Include contribution to the kinetic energy at this edge
+                    # point from the element below:
+                    K_psi[:, :-1] += Ky_psi[:, 1:, j, 0]
+                    K_psi[:, -1] += Ky_psi[:, 0, j, 0] # periodic boundary conditions
 
-            # y kinetic energy operator operating on psi.
-            Ky_psi = np.einsum('kl,xyjl->xyjk', Ky[y_points, :],  psi[:, :, x_points, :])
+                # Particle density at this DVR point:
+                density = psi[:, :, j, k].conj() * density_operator[j, k] * psi[:, :, j, k]
 
-            if k == 0: # If we are currently working on y edgepoints:
-                # Add contributions from top to bottom across edges:
-                Ky_psi[:, 1:, :, 0] += Ky_psi[:, :-1, :, -1]
-                Ky_psi[:, 0, :, 0] += Ky_psi[:, -1, :, -1] # Periodic boundary conditions
+                # Diagonals of the total Hamiltonian operator at this DVR point:
+                H_diags = K_diags[j, k] + V[:, :, j, k] + g * density
+                # Hamiltonian with diagonals subtracted off, operating on psi:
+                H_hollow_psi = K_psi - K_diags[j, k] * psi[:, :, j, k]
 
-                # Copy summed values back from bottom to top across edges:
-                Ky_psi[:, :-1, :, -1] = Ky_psi[:, 1:, :, 0]
-                Ky_psi[:, -1, :, -1] = Ky_psi[:, 0, :, 0] # Periodic boundary conditions
+                # The Gauss-Seidel prediction for the new psi:
+                psi_new_GS = (mu * psi[:, :, j, k] - H_hollow_psi)/H_diags
 
-            # Total kinetic energy operator operating on psi:
-            if j == 0:
-                Kx_psi = Kx_psi[:, :, points]
-            else:
-                Kx_psi = Kx_psi[:, :, 0, :]
-            if k == 0:
-                Ky_psi = Ky_psi[:, :, points]
-            else:
-                Ky_psi = Ky_psi[:, :, :, 0]
-            K_psi = Kx_psi + Ky_psi
+                # update the relevant points of psi
+                psi[:, :, j, k] += RELAXATION_PARAMETER * (psi_new_GS - psi[:, :, j, k])
 
-            # Particle density at the relevant points:
-            density = psi[:, :, points].conj()*density_operator[points]*psi[:, :, points]
+            i += 1
 
-            # Diagonals of the total Hamiltonian operator at the relevant
-            # points. Shape (n_elements x n_points), where n_points is however
-            # many points we're operating on at the moment (usually one, more
-            # if we are doing endpoints):
-            H_diags = K_diags[points] + V[:, :, points] + g * density
-            H_hollow_psi = K_psi - K_diags[points]*psi[:, :, points]
-
-            # The Gauss-Seidel prediction for the new psi:
-            psi_new_GS = (mu*psi[:, :, points] - H_hollow_psi)/H_diags
-
-            # update the relevant points of psi
-            psi[:, :, points] += RELAXATION_PARAMETER*(psi_new_GS - psi[:, :, points])
-
-        i += 1
-
-        if not i % 100:
-            mucalc, u_mucalc = compute_mu(psi)
-            convergence = abs((mucalc - mu)/mu)
-            print(i, mu, mucalc, convergence)
-            if convergence < 1e-13:
+            if not i % 100:
+                mucalc, u_mucalc = compute_mu(psi)
+                convergence = abs((mucalc - mu)/mu)
+                print(i, mu, mucalc, convergence)
+                if convergence < 1e-13:
+                    plot(psi, show=False)
+                    break
+            if not i % 100:
                 plot(psi, show=False)
-                break
-        if not i % 100:
-            plot(psi, show=False)
 
     return psi
 
@@ -381,6 +360,8 @@ if __name__ == '__main__':
     plot_item = None
 
     def run_sims():
+        # import lineprofiler
+        # lineprofiler.setup()
         psi = initial()
 
         # k = 2*pi*5/(10e-6)
