@@ -54,7 +54,7 @@ odd_internal_elements = odd_elements & internal_elements
 even_internal_elements = even_elements & internal_elements
 
 # Second derivative operator, (N x N):
-grad2 = elements.second_derivative_operators()
+grad2 = elements.second_derivative_operator()
 
 # Density operator. Is diagonal and so is represented as a length N array
 # containing its diagonals:
@@ -318,7 +318,7 @@ def evolution(psi):
 if __name__ == '__main__':
 
     time_of_last_plot = time.time()
-    target_frame_rate = 20
+    target_frame_rate = 10
 
     plot_window = pg.PlotWindow()
     abs_curve = None

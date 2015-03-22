@@ -238,12 +238,12 @@ class FiniteElements1D(object):
         rho = self.values**2
         return rho
 
-    def derivative_operators(self):
+    def derivative_operator(self):
         """Returns a (self.N x self.N) array for the derivative operator on
         each element"""
         return self.element.derivative_operator()
 
-    def second_derivative_operators(self):
+    def second_derivative_operator(self):
         """Returns a (self.N x self.N) array for the second derivative
         operator on each element"""
         return self.element.second_derivative_operator()
@@ -284,31 +284,155 @@ class FiniteElements1D(object):
         return self.points.flatten(), values.flatten()
 
 
+class FiniteElements2D(object):
+    """A class for operations on an array of identical DVR finite elements in two dimensions"""
+    def __init__(self, Nx, Ny, n_elements_x, n_elements_y,
+                 left_boundary, right_boundary,
+                 bottom_boundary, top_boundary, ):
+        self.Nx = Nx
+        self.Ny = Ny
+        self.n_elements_x = n_elements_x
+        self.n_elements_y = n_elements_y
+        self.left_boundary = left_boundary
+        self.right_boundary = right_boundary
+        self.top_boundary = top_boundary
+        self.bottom_boundary = bottom_boundary
+
+        self.element_width_x = (right_boundary - left_boundary)/n_elements_x
+        self.element_edges_x = np.linspace(left_boundary, right_boundary, n_elements_x + 1)
+
+        self.element_width_y = (top_boundary - bottom_boundary)/n_elements_y
+        self.element_edges_y = np.linspace(bottom_boundary, top_boundary, n_elements_y + 1)
+
+        # An element to represent all elements in the x dimension, since they
+        # are identical. We instantiate it with the domain [0,
+        # element_width_x] and interpret its points as being relative to the
+        # left side of the specific element we're dealing with at any time.
+        self.element_x = Element(Nx, 0, self.element_width_x, N_left=Nx, N_right=Nx,
+                                 width_left=self.element_width_x, width_right=self.element_width_x)
+        # The same for the y direction:
+        self.element_y = Element(Ny, 0, self.element_width_y, N_left=Ny, N_right=Ny,
+                                 width_left=self.element_width_y, width_right=self.element_width_y)
+
+        # construct a (self.n_elements_x x self.Nx) array for the quadrature
+        # points in the x direction. The following is an 'outer sum' between
+        # the position of points within an element, and the position of the
+        # left edges of the elements:
+        self.points_x = self.element_x.points + self.element_edges_x[:-1, np.newaxis]
+        # The same for the y direction:
+        self.points_y = self.element_y.points + self.element_edges_y[:-1, np.newaxis]
+
+        # The above two arrays, each broadcast into an extra two dimensions
+        # forming an array with shape (self.n_elements_x x self.n_elements_y x
+        # self.Nx x self.Ny), like meshgrid does.
+        self.shape = (self.n_elements_x, self.n_elements_y, self.Nx, self.Ny)
+        self.points_X = self.points_x[:, np.newaxis, :, np.newaxis] * np.ones(self.shape)
+        self.points_Y = self.points_y[np.newaxis, :, np.newaxis, :] * np.ones(self.shape)
+
+        # The weights are identical in each element so we only need a length
+        # self.Nx array and a self.Ny array:
+        self.weights_x = self.element_x.weights
+        self.weights_y = self.element_y.weights
+
+        # The product of the weights over the 2D space; shape (self.Nx x self.Ny)
+        self.weights = np.outer(self.weights_x, self.weights_y)
+
+        # The values of each DVR basis function at its points:
+        self.values = 1/np.sqrt(self.weights)
+        # The basis functions at the edges have different normalisation, they
+        # are 1/sqrt(2*w) rather than just 1/sqrt(w):
+        self.values[0,:] /= np.sqrt(2)
+        self.values[-1,:] /= np.sqrt(2)
+        self.values[:,0] /= np.sqrt(2)
+        self.values[:,-1] /= np.sqrt(2)
+
+    def density_operator(self):
+        """Returns a 1D array of size self.N representing the diagonals of the
+        density operator rho on an element. vec.conj()*rho*vec then gives the
+        wavefunction density |psi|^2 at each quadrature point."""
+        rho = self.values**2
+        return rho
+
+    def derivative_operators(self):
+        """Returns a (self.Nx x self.Nx) array for the derivative operator on
+        each element in the x direction, and a self.Ny x self.Ny) array for
+        the derivative operator on each element in the y direction."""
+        return self.element_x.derivative_operator(), self.element_y.derivative_operator()
+
+    def second_derivative_operators(self):
+        """Returns a (self.Nx x self.Nx) array for the second derivative
+        operator on each element in the x direction, and a self.Ny x self.Ny)
+        array for the second derivative operator on each element in the y
+        direction."""
+        return self.element_x.second_derivative_operator(), self.element_y.second_derivative_operator()
+
+    def make_vector(self, f):
+        """Takes a function of space f, and returns a (self.n_elements_x x
+        self.n_elements_y x self.Nx x self.Ny) array containing the coefficients
+        for that function's representation in the DVR basis in each
+        element."""
+        psi = np.zeros(self.shape, dtype=complex)
+        psi[:] = f(self.points_X, self.points_Y)/self.values
+        return psi
+
+    def get_values(self, psi):
+        """Takes a (self.n_elements_x x self.n_elements_y x self.Nx x self.Ny)
+        array psi of DVR coefficients in the FEDVR basis. Returns two 2D arrays of
+        quadrature points and a 2D array of the values at those points of the
+        spatial function the DVR vector represents."""
+        values = psi*self.values
+        output_shape = (self.n_elements_x*self.Nx, self.n_elements_y*self.Ny)
+        x = self.points_x.flatten()
+        y = self.points_y.flatten()
+        values = values.transpose(0,2,1,3).reshape(output_shape)
+        return x, y, values
+
+
 if __name__ == '__main__':
+
+    from PyQt4 import QtGui
+    import pyqtgraph.opengl as gl
+
+    qapplication = QtGui.QApplication([])
+
+    w = gl.GLViewWidget()
+    w.show()
+    w.setWindowTitle('pyqtgraph example: GLSurfacePlot')
+    w.setCameraPosition(distance=50)
+
+    # Add a grid to the view
+    g = gl.GLGridItem()
+    g.scale(2,2,1)
+    g.setDepthValue(10)  # draw grid after surfaces since they may be translucent
+    w.addItem(g)
 
     # Space:
     x_min = -15e-6
     x_max = 15e-6
+    y_min = -15e-6
+    y_max = 15e-6
 
     # Finite elements:
-    N = 7
-    n_elements = 10
+    Nx = 7
+    Ny = 7
+    n_elements_x = 10
+    n_elements_y = 10
 
-    elements = FiniteElements1D(N, n_elements, x_min, x_max)
+    elements = FiniteElements2D(Nx, Ny, n_elements_x, n_elements_y, x_min, x_max, y_min, y_max)
 
-    def f(x):
-        sigma = 3e-6
-        return np.exp(-x**2/(2*sigma**2))
+    def f(x, y):
+        sigma_x = 3e-6
+        sigma_y = 3e-6
+        return np.exp(-x**2/(2*sigma_x**2) - y**2/(2*sigma_y**2))
 
     psi = elements.make_vector(f)
-    x_interp, psi_interp = elements.interpolate_vector(psi, 10000)
-    points, psi_values = elements.get_values(psi)
-    x = np.linspace(x_min, x_max, 10000)
-    psi_exact = f(x)
-    pl.plot(x*1e6, psi_exact, 'k-')
-    pl.plot(x_interp*1e6, psi_interp.real, 'r--')
-    pl.plot(points*1e6, psi_values.real, 'ko')
-    pl.grid(True)
-    for edge in elements.element_edges:
-        pl.axvline(edge*1e6, linestyle='--', color='k')
-    pl.show()
+    x, y, psi_interp = elements.get_values(psi)
+
+    psi_exact = f(x[:, np.newaxis], y[np.newaxis, :])
+
+
+    p2 = gl.GLSurfacePlotItem(x=x*1e6, y=y*1e6, z=psi_interp.real*10, shader='normalColor')
+    w.addItem(p2)
+
+    qapplication.exec_()
+
