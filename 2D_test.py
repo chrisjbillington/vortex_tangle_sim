@@ -37,8 +37,8 @@ y_min = -10e-6
 y_max = 10e-6
 
 # Finite elements:
-Nx = 7
-Ny = 7
+Nx = 9
+Ny = 9
 n_elements_x = 32
 n_elements_y = 32
 assert not (n_elements_x % 2), "Odd-even split step method requires an even number of elements"
@@ -309,9 +309,9 @@ def evolution(psi, t_final, dt=None, imaginary_time=False):
     # too.
     density = (psi.conj()*density_operator*psi).real
     if imaginary_time:
-        U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu_initial) * dt/2)
+        U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
     else:
-        U_V_halfstep = np.exp(-1j/hbar * (g * density + V - mu_initial) * dt/2)
+        U_V_halfstep = np.exp(-1j/hbar * (g * density + V) * dt/2)
 
     i = 0
     t = 0
@@ -379,9 +379,9 @@ def evolution(psi, t_final, dt=None, imaginary_time=False):
             renormalise(psi)
         density[:] = (psi.conj()*density_operator*psi).real
         if imaginary_time:
-            U_V_halfstep[:] = np.exp(-1/hbar * (g * density + V - mu_initial) * dt/2)
+            U_V_halfstep[:] = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
         else:
-            U_V_halfstep[:] = np.exp(-1j/hbar * (g * density + V - mu_initial) * dt/2)
+            U_V_halfstep[:] = np.exp(-1j/hbar * (g * density + V) * dt/2)
 
         # Evolve for half a timestep with potential evolution operator:
         psi[:] = U_V_halfstep*psi
@@ -398,7 +398,7 @@ def evolution(psi, t_final, dt=None, imaginary_time=False):
                   round(np.log10(abs(mucalc/mu_initial-1))),
                   round(1e3/step_rate, 1), 'msps',
                   round(frame_rate, 1), 'fps')
-        if (time.time() - time_of_last_plot) > 1/target_frame_rate:
+        # if (time.time() - time_of_last_plot) > 1/target_frame_rate:
             if imaginary_time:
                 renormalise(psi)
             plot(psi, t, show=False)
@@ -437,12 +437,12 @@ if __name__ == '__main__':
         # import lineprofiler
         # lineprofiler.setup()
         import cPickle
-        if not os.path.exists('psi.pickle'):
+        if not os.path.exists('FEDVR_initial.pickle'):
             psi = initial()
-            with open('psi.pickle', 'w') as f:
+            with open('FEDVR_initial.pickle', 'w') as f:
                 cPickle.dump(psi, f)
         else:
-            with open('psi.pickle') as f:
+            with open('FEDVR_initial.pickle') as f:
                 psi = cPickle.load(f)
 
         # k = 2*pi*5/(10e-6)
@@ -457,14 +457,23 @@ if __name__ == '__main__':
         # soliton_envelope = dark_soliton(x, x_soliton, rho_bg, v_soliton)
         # psi *= soliton_envelope
 
-        # Scatter some vortices randomly about:
-        for i in range(30):
-            x_vortex = np.random.normal(0, scale=R)
-            y_vortex = np.random.normal(0, scale=R)
-            psi[:] *= np.exp(1j*np.arctan2(y - y_vortex, x - x_vortex))
+        if not os.path.exists('FEDVR_vortices.pickle'):
+            # Scatter some vortices randomly about:
+            for i in range(30):
+                x_vortex = np.random.normal(0, scale=R)
+                y_vortex = np.random.normal(0, scale=R)
+                psi[:] *= np.exp(1j*np.arctan2(y - y_vortex, x - x_vortex))
 
-        psi = evolution(psi, t_final=400e-6, imaginary_time=True)
-        psi = evolution(psi, t_final=np.inf)
+
+            psi = evolution(psi, t_final=400e-6, imaginary_time=True)
+
+            with open('FEDVR_vortices.pickle', 'w') as f:
+                cPickle.dump(psi, f)
+        else:
+            with open('FEDVR_vortices.pickle') as f:
+                psi = cPickle.load(f)
+        psi = evolution(psi, dt=2e-7, t_final=np.inf)
+
 
     # run_sims()
     inthread(run_sims)
