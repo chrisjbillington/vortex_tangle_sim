@@ -366,6 +366,29 @@ class FiniteElements2D(object):
         direction."""
         return self.element_x.second_derivative_operator(), self.element_y.second_derivative_operator()
 
+    def interpolate_vector(self, psi, npts_x, npts_y):
+        """Takes a (self.n_elements_x, self.n_elements_y, self.Nx, self.Ny)
+        array psi of coefficients in the FEDVR basis and interpolates the
+        spatial function it represents to npts equally spaced points per
+        element. Returns arrays of the x and y points used and the values at
+        those points."""
+        # The array of points within an element:
+        x = np.linspace(0, self.element_width_x, npts_x, endpoint=False)
+        y = np.linspace(0, self.element_width_y, npts_y, endpoint=False)
+        f = np.zeros((self.n_elements_x, self.n_elements_y, npts_x, npts_y), dtype=complex)
+        for j, basis_function_x in enumerate(self.element_x.basis):
+            for k, basis_function_y in enumerate(self.element_y.basis):
+                f += (psi[:, :, j, k, np.newaxis, np.newaxis] *
+                      basis_function_x(x[:, np.newaxis]) *
+                      basis_function_y(y[np.newaxis, :]))
+
+        x_all = (x + self.element_edges_x[:-1, np.newaxis]).flatten()
+        y_all = (y + self.element_edges_y[:-1, np.newaxis]).flatten()
+        shape = (self.n_elements_x * npts_x, self.n_elements_y * npts_y)
+        f_reshaped = f.transpose(0, 2, 1, 3).reshape(shape)
+
+        return x_all, y_all, f_reshaped
+
     def make_vector(self, f):
         """Takes a function of space f, and returns a (self.n_elements_x x
         self.n_elements_y x self.Nx x self.Ny) array containing the coefficients
@@ -426,8 +449,8 @@ if __name__ == '__main__':
         return np.exp(-x**2/(2*sigma_x**2) - y**2/(2*sigma_y**2))
 
     psi = elements.make_vector(f)
-    x, y, psi_interp = elements.get_values(psi)
-
+    # x, y, psi_interp = elements.get_values(psi)
+    x, y, psi_interp = elements.interpolate_vector(psi, Nx, Ny)
     psi_exact = f(x[:, np.newaxis], y[np.newaxis, :])
 
 

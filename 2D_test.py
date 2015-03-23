@@ -85,7 +85,7 @@ V = 0.5*m*omega**2*(x**2 + y**2)
 def plot(psi, t=None, show=False):
     global plot_item
 
-    x_plot, y_plot, psi_interp = elements.get_values(psi)
+    x_plot, y_plot, psi_interp = elements.interpolate_vector(psi, Nx, Ny)
     rho_plot = np.abs(psi_interp)**2
 
     if plot_item is None:
@@ -276,7 +276,7 @@ def initial():
     return psi
 
 
-def evolution(psi):
+def evolution(psi, imaginary_time=False):
 
     global time_of_last_plot
 
@@ -290,21 +290,34 @@ def evolution(psi):
     n_initial = compute_number(psi)
     mu_initial, unc_mu_inintial = compute_mu(psi)
 
-    # The kinetic energy unitary evolution oparators for half a timestep,
-    # shapes (Nx, Nx) and (Ny, Ny). Not diagonal, but the same in each
-    # element.
-    U_Kx_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2x) * dt/2)
-    U_Ky_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2y) * dt/2)
-    # The same as above but for a full timestep:
-    U_Kx_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2x) * dt)
-    U_Ky_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2y) * dt)
+    if imaginary_time:
+        # The kinetic energy unitary evolution oparators for half a timestep
+        # in imaginary time, shapes (Nx, Nx) and (Ny, Ny). Not diagonal, but
+        # the same in each element.
+        U_Kx_halfstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2x) * dt/2)
+        U_Ky_halfstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2y) * dt/2)
+        # The same as above but for a full timestep:
+        U_Kx_fullstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2x) * dt)
+        U_Ky_fullstep = expm(-1/hbar * (-hbar**2/(2*m) * grad2y) * dt)
+    else:
+        # The kinetic energy unitary evolution oparators for half a timestep,
+        # shapes (Nx, Nx) and (Ny, Ny). Not diagonal, but the same in each
+        # element.
+        U_Kx_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2x) * dt/2)
+        U_Ky_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2y) * dt/2)
+        # The same as above but for a full timestep:
+        U_Kx_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2x) * dt)
+        U_Ky_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2y) * dt)
 
     # The potential energy evolution operator for the first half timestep. It
     # is always the same as at the end of timesteps, so we usually just re-use
     # at the start of each loop. But this being the first loop we need it now
     # too.
     density = (psi.conj()*density_operator*psi).real
-    U_V_halfstep = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
+    if imaginary_time:
+        U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
+    else:
+        U_V_halfstep = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
 
     i = 0
     t = 0
@@ -369,7 +382,10 @@ def evolution(psi):
 
         # Calculate potential energy evolution operator for half a step
         density[:] = (psi.conj()*density_operator*psi).real
-        U_V_halfstep[:] = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
+        if imaginary_time:
+            U_V_halfstep[:] = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
+        else:
+            U_V_halfstep[:] = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
 
         # Evolve for half a timestep with potential evolution operator:
         psi[:] = U_V_halfstep*psi
@@ -384,7 +400,7 @@ def evolution(psi):
                   round(np.log10(abs(mucalc/mu_initial-1))),
                   round(1e3/step_rate, 1), 'msps',
                   round(frame_rate, 1), 'fps')
-        if not i % 100:
+        if (time.time() - time_of_last_plot) > 1/target_frame_rate:
             plot(psi, t, show=False)
             n_frames += 1
             time_of_last_plot = time.time()
@@ -395,7 +411,7 @@ def evolution(psi):
 if __name__ == '__main__':
 
     time_of_last_plot = time.time()
-    target_frame_rate = 0.1
+    target_frame_rate = 10
 
     qapplication = QtGui.QApplication([])
     plot_window = gl.GLViewWidget()
@@ -423,9 +439,9 @@ if __name__ == '__main__':
             with open('psi.pickle') as f:
                 psi = cPickle.load(f)
 
-        k = 2*pi*5/(10e-6)
+        # k = 2*pi*5/(10e-6)
         # # Give the condensate a kick:
-        psi *= np.exp(1j*k*x)
+        # psi *= np.exp(1j*k*x)
 
         # print a soliton onto the condensate:
         # density = (psi.conj()*density_operator*psi).real
@@ -435,8 +451,13 @@ if __name__ == '__main__':
         # soliton_envelope = dark_soliton(x, x_soliton, rho_bg, v_soliton)
         # psi *= soliton_envelope
 
-        # # psi = imaginary_evolution(psi)
-        psi = evolution(psi)
+        # Scatter some vortices randomly about:
+        for i in range(30):
+            x_vortex = np.random.normal(0, scale=R)
+            y_vortex = np.random.normal(0, scale=R)
+            psi[:] *= np.exp(1j*np.arctan2(y - y_vortex, x - x_vortex))
+
+        psi = evolution(psi, imaginary_time=True)
 
     # run_sims()
     inthread(run_sims)
