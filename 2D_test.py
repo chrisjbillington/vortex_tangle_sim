@@ -7,9 +7,6 @@ from FEDVR import FiniteElements2D
 
 from PyQt4 import QtGui
 from qtutils import inthread, inmain_decorator
-import pyqtgraph.opengl as gl
-
-from IPython import embed as DEBUG
 
 def get_number_and_trap(rho_max, R):
     """Return the 1D normalisation constant N (units of atoms per unit area)
@@ -34,10 +31,10 @@ N_2D, omega = get_number_and_trap(rho_max, R)  # 2D normalisation constant and h
 mu = g*rho_max                              # Chemical potential of the groundstate
 
 # Space:
-x_min = -15e-6
-x_max = 15e-6
-y_min = -15e-6
-y_max = 15e-6
+x_min = -10e-6
+x_max = 10e-6
+y_min = -10e-6
+y_max = 10e-6
 
 # Finite elements:
 Nx = 7
@@ -83,18 +80,16 @@ V = 0.5*m*omega**2*(x**2 + y**2)
 
 @inmain_decorator()
 def plot(psi, t=None, show=False):
-    global plot_item
+    global image_item
 
     x_plot, y_plot, psi_interp = elements.interpolate_vector(psi, Nx, Ny)
     rho_plot = np.abs(psi_interp)**2
 
-    if plot_item is None:
-        plot_item = gl.GLSurfacePlotItem(x=x_plot*1e6, y=y_plot*1e6,
-                                         z=10*rho_plot/rho_max, shader='normalColor')
-        plot_window.addItem(plot_item)
-        plot_window.show()
+    if image_item is None:
+        image_item = image_view.setImage(rho_plot)
     else:
-        plot_item.setData(x=x_plot*1e6, y=y_plot*1e6, z=10*rho_plot/rho_max)
+        image_item.setData(rho_plot)
+
 
 
 def compute_mu(psi):
@@ -155,16 +150,16 @@ def compute_number(psi):
     return ncalc
 
 
+def renormalise(psi):
+    # imposing normalisation on the wavefunction:
+    p = psi[:, :, :-1, :-1] # Don't double count edges
+    ncalc = np.vdot(p, p)
+    psi[:] *= np.sqrt(N_2D/ncalc)
+
+
 def initial():
 
     RELAXATION_PARAMETER = 1.7
-
-    def renormalise(psi):
-        # imposing normalisation on the wavefunction:
-        p = psi[:, :, :-1, :-1] # Don't double count edges
-        ncalc = np.vdot(p, p)
-        psi[:] *= np.sqrt(N_2D/ncalc)
-
 
     # The initial guess:
     def initial_guess(x, y):
@@ -270,23 +265,22 @@ def initial():
             if convergence < 1e-13:
                 plot(psi, show=False)
                 break
-        if not i % 100:
+        if not i % 10:
             plot(psi, show=False)
 
     return psi
 
 
-def evolution(psi, imaginary_time=False):
+def evolution(psi, t_final, dt=None, imaginary_time=False):
 
     global time_of_last_plot
-
-    dx_max = np.diff(x[0, 0, :, 0]).max()
-    dx_min = np.diff(x[0, 0, :, 0]).min()
-    dy_max = np.diff(y[0, 0, 0, :]).max()
-    dy_min = np.diff(y[0, 0, 0, :]).min()
-    dt = max(dx_max, dy_max) * min(dx_min, dy_min) * m / (8 * pi * hbar)
-    t_final = 100e-3
-
+    if dt is None:
+        dx_max = np.diff(x[0, 0, :, 0]).max()
+        dx_min = np.diff(x[0, 0, :, 0]).min()
+        dy_max = np.diff(y[0, 0, 0, :]).max()
+        dy_min = np.diff(y[0, 0, 0, :]).min()
+        dt = max(dx_max, dy_max) * min(dx_min, dy_min) * m / (8 * pi * hbar)
+        print('using dt = ', dt)
     n_initial = compute_number(psi)
     mu_initial, unc_mu_inintial = compute_mu(psi)
 
@@ -315,16 +309,16 @@ def evolution(psi, imaginary_time=False):
     # too.
     density = (psi.conj()*density_operator*psi).real
     if imaginary_time:
-        U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
+        U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu_initial) * dt/2)
     else:
-        U_V_halfstep = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
+        U_V_halfstep = np.exp(-1j/hbar * (g * density + V - mu_initial) * dt/2)
 
     i = 0
     t = 0
 
     start_time = time.time()
     n_frames = 0
-    while True: # t < t_final:
+    while t < t_final:
         # Evolve for half a step with potential evolution operator:
         psi[:] = U_V_halfstep*psi
 
@@ -381,26 +375,32 @@ def evolution(psi, imaginary_time=False):
 
 
         # Calculate potential energy evolution operator for half a step
+        if imaginary_time:
+            renormalise(psi)
         density[:] = (psi.conj()*density_operator*psi).real
         if imaginary_time:
-            U_V_halfstep[:] = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
+            U_V_halfstep[:] = np.exp(-1/hbar * (g * density + V - mu_initial) * dt/2)
         else:
-            U_V_halfstep[:] = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
+            U_V_halfstep[:] = np.exp(-1j/hbar * (g * density + V - mu_initial) * dt/2)
 
         # Evolve for half a timestep with potential evolution operator:
         psi[:] = U_V_halfstep*psi
 
-        if not i % 1000:
+        if not i % 100:
+            if imaginary_time:
+                renormalise(psi)
             mucalc, u_mucalc = compute_mu(psi)
             ncalc = compute_number(psi)
             step_rate = (i+1)/(time.time() - start_time)
             frame_rate = n_frames/(time.time() - start_time)
-            print(round(t*1e3), 'ms',
+            print(round(t*1e6), 'us',
                   round(np.log10(abs(ncalc/n_initial-1))),
                   round(np.log10(abs(mucalc/mu_initial-1))),
                   round(1e3/step_rate, 1), 'msps',
                   round(frame_rate, 1), 'fps')
         if (time.time() - time_of_last_plot) > 1/target_frame_rate:
+            if imaginary_time:
+                renormalise(psi)
             plot(psi, t, show=False)
             n_frames += 1
             time_of_last_plot = time.time()
@@ -410,13 +410,19 @@ def evolution(psi, imaginary_time=False):
 
 if __name__ == '__main__':
 
+    import pyqtgraph as pg
+
     time_of_last_plot = time.time()
-    target_frame_rate = 10
+    target_frame_rate = 1
 
     qapplication = QtGui.QApplication([])
-    plot_window = gl.GLViewWidget()
-    plot_window.setCameraPosition(distance=50)
-    plot_item = None
+    win = QtGui.QMainWindow()
+    win.resize(800,800)
+    image_view = pg.ImageView()
+    image_item = None
+    win.setCentralWidget(image_view)
+    win.show()
+    win.setWindowTitle('pyqtgraph example: ImageView')
 
     def dark_soliton(x, x_sol, rho, v):
         healing_length = hbar/np.sqrt(2*m*rho*g)
@@ -457,7 +463,8 @@ if __name__ == '__main__':
             y_vortex = np.random.normal(0, scale=R)
             psi[:] *= np.exp(1j*np.arctan2(y - y_vortex, x - x_vortex))
 
-        psi = evolution(psi, imaginary_time=True)
+        psi = evolution(psi, t_final=400e-6, imaginary_time=True)
+        psi = evolution(psi, t_final=np.inf)
 
     # run_sims()
     inthread(run_sims)
