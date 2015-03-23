@@ -1,4 +1,5 @@
 from __future__ import division, print_function
+import os
 import time
 import numpy as np
 from scipy.linalg import expm
@@ -41,8 +42,8 @@ y_max = 15e-6
 # Finite elements:
 Nx = 7
 Ny = 7
-n_elements_x = 64
-n_elements_y = 64
+n_elements_x = 32
+n_elements_y = 32
 assert not (n_elements_x % 2), "Odd-even split step method requires an even number of elements"
 assert not (n_elements_y % 2), "Odd-even split step method requires an even number of elements"
 
@@ -279,26 +280,24 @@ def evolution(psi):
 
     global time_of_last_plot
 
-    dx_max = np.diff(x[0,:]).max()
-    dx_min = np.diff(x[0,:]).min()
-    dt = dx_max*dx_min*m/(8*pi*hbar)
-    t_final = 1e-3
-
-
-    dx_max = np.diff(x[0,:]).max()
-    dx_min = np.diff(x[0,:]).min()
-    dt = dx_max*dx_min*m/(8*pi*hbar)
+    dx_max = np.diff(x[0, 0, :, 0]).max()
+    dx_min = np.diff(x[0, 0, :, 0]).min()
+    dy_max = np.diff(y[0, 0, 0, :]).max()
+    dy_min = np.diff(y[0, 0, 0, :]).min()
+    dt = max(dx_max, dy_max) * min(dx_min, dy_min) * m / (8 * pi * hbar)
     t_final = 100e-3
 
     n_initial = compute_number(psi)
     mu_initial, unc_mu_inintial = compute_mu(psi)
 
-    # The kinetic energy unitary evolution oparators for half a timestep, each is
-    # (N x N). Not diagonal, but the same in each element. We need different operators for
-    # the first and last elements in order to impose boundary conditions
-    U_K_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2) * dt/2)
+    # The kinetic energy unitary evolution oparators for half a timestep,
+    # shapes (Nx, Nx) and (Ny, Ny). Not diagonal, but the same in each
+    # element.
+    U_Kx_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2x) * dt/2)
+    U_Ky_halfstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2y) * dt/2)
     # The same as above but for a full timestep:
-    U_K_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2) * dt)
+    U_Kx_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2x) * dt)
+    U_Ky_fullstep = expm(-1j/hbar * (-hbar**2/(2*m) * grad2y) * dt)
 
     # The potential energy evolution operator for the first half timestep. It
     # is always the same as at the end of timesteps, so we usually just re-use
@@ -316,24 +315,57 @@ def evolution(psi):
         # Evolve for half a step with potential evolution operator:
         psi[:] = U_V_halfstep*psi
 
-        # Evolve odd elements for half a step with kinetic energy evolution operator:
-        psi[odd_elements] = np.einsum('ij,nj->ni', U_K_halfstep, psi[odd_elements])
 
-        # Copy odd endpoints -> adjacent even endpoints:
-        psi[even_elements, -1] = psi[odd_elements, 0]
-        psi[even_internal_elements, 0] = psi[odd_internal_elements, -1]
-        psi[0, 0] = psi[-1, -1]
+        # Evolve odd (in x direction) elements for half a step with x kinetic energy evolution operator:
+        psi[odd_elements_x, :, :, :] = np.einsum('ij,xyjl->xyil', U_Kx_halfstep, psi[odd_elements_x, :, :, :])
 
-        # Evolve even elements for a full step with kinetic energy evolution operator:
-        psi[even_elements] = np.einsum('ij,nj->ni', U_K_fullstep, psi[even_elements])
+        # Copy odd endpoints -> adjacent even endpoints in x direction:
+        psi[even_elements_x, :, -1, :] = psi[odd_elements_x, :, 0, :]
+        psi[even_internal_elements_x, :, 0, :] = psi[odd_internal_elements_x, :, -1, :]
+        psi[0, :, 0, :] = psi[-1, :, -1, :] # periodic boundary conditions
 
-        # Copy even endpoints -> adjacent odd endpoints:
-        psi[odd_internal_elements, -1] = psi[even_internal_elements, 0]
-        psi[odd_elements, 0] = psi[even_elements, -1]
-        psi[-1, -1] = psi[0, 0]
+        # Evolve even (in x direction) elements for a full step with x kinetic energy evolution operator:
+        psi[even_elements_x, :, :, :] = np.einsum('ij,xyjl->xyil', U_Kx_fullstep, psi[even_elements_x, :, :, :])
 
-        # Evolve odd elements for half a step with kinetic energy evolution operator:
-        psi[odd_elements] = np.einsum('ij,nj->ni', U_K_halfstep, psi[odd_elements])
+        # Copy even endpoints -> adjacent odd endpoints in x direction:
+        psi[odd_internal_elements_x, :, -1, :] = psi[even_internal_elements_x, :, 0, :]
+        psi[odd_elements_x, :, 0, :] = psi[even_elements_x, :, -1, :]
+        psi[-1, :, -1, :] = psi[0, :, 0, :] # periodic boundary conditions
+
+        # Evolve odd (in x direction) elements for half a step with x kinetic energy evolution operator:
+        psi[odd_elements_x, :, :, :] = np.einsum('ij,xyjl->xyil', U_Kx_halfstep, psi[odd_elements_x, :, :, :])
+
+        # Copy odd endpoints -> adjacent even endpoints in x direction:
+        psi[even_elements_x, :, -1, :] = psi[odd_elements_x, :, 0, :]
+        psi[even_internal_elements_x, :, 0, :] = psi[odd_internal_elements_x, :, -1, :]
+        psi[0, :, 0, :] = psi[-1, :, -1, :] # periodic boundary conditions
+
+
+
+        # Evolve odd (in y direction) elements for half a step with y kinetic energy evolution operator:
+        psi[:, odd_elements_y, :, :] = np.einsum('kl,xyjl->xyjk', U_Ky_halfstep, psi[:, odd_elements_y, :, :])
+
+        # Copy odd endpoints -> adjacent even endpoints in x direction:
+        psi[:, even_elements_y, :, -1] = psi[:, odd_elements_y, :, 0]
+        psi[:, even_internal_elements_y, :, 0] = psi[:, odd_internal_elements_y, :, -1]
+        psi[:, 0, :, 0] = psi[:, -1, :, -1] # periodic boundary conditions
+
+        # Evolve even (in y direction) elements for a full step with y kinetic energy evolution operator:
+        psi[:, even_elements_y, :, :] = np.einsum('kl,xyjl->xyjk', U_Ky_fullstep, psi[:, even_elements_y, :, :])
+
+        # Copy even endpoints -> adjacent odd endpoints in x direction:
+        psi[:, odd_internal_elements_y, :, -1] = psi[:, even_internal_elements_y, :, 0]
+        psi[:, odd_elements_y, :, 0] = psi[:, even_elements_x, :, -1]
+        psi[:, -1, :, -1] = psi[:, 0, :, 0] # periodic boundary conditions
+
+        # Evolve odd (in y direction) elements for half a step with y kinetic energy evolution operator:
+        psi[:, odd_elements_y, :, :] = np.einsum('kl,xyjl->xyjk', U_Ky_halfstep, psi[:, odd_elements_y, :, :])
+
+        # Copy odd endpoints -> adjacent even endpoints in x direction:
+        psi[:, even_elements_y, :, -1] = psi[:, odd_elements_y, :, 0]
+        psi[:, even_internal_elements_y, :, 0] = psi[:, odd_internal_elements_y, :, -1]
+        psi[:, 0, :, 0] = psi[:, -1, :, -1] # periodic boundary conditions
+
 
         # Calculate potential energy evolution operator for half a step
         density[:] = (psi.conj()*density_operator*psi).real
@@ -343,7 +375,6 @@ def evolution(psi):
         psi[:] = U_V_halfstep*psi
 
         if not i % 1000:
-            # print(i, t*1e3, 'ms')
             mucalc, u_mucalc = compute_mu(psi)
             ncalc = compute_number(psi)
             step_rate = (i+1)/(time.time() - start_time)
@@ -351,15 +382,9 @@ def evolution(psi):
             print(round(t*1e3), 'ms',
                   round(np.log10(abs(ncalc/n_initial-1))),
                   round(np.log10(abs(mucalc/mu_initial-1))),
-                  round(1e6/step_rate, 1), 'usps',
+                  round(1e3/step_rate, 1), 'msps',
                   round(frame_rate, 1), 'fps')
-        if (time.time() - time_of_last_plot) > 1/target_frame_rate:
-
-            # Copy odd endpoints -> adjacent even endpoints:
-            psi[even_elements, -1] = psi[odd_elements, 0]
-            psi[even_internal_elements, 0] = psi[odd_internal_elements, -1]
-            psi[0, 0] = psi[-1, -1]
-
+        if not i % 100:
             plot(psi, t, show=False)
             n_frames += 1
             time_of_last_plot = time.time()
@@ -370,35 +395,51 @@ def evolution(psi):
 if __name__ == '__main__':
 
     time_of_last_plot = time.time()
-    target_frame_rate = 10
+    target_frame_rate = 0.1
 
     qapplication = QtGui.QApplication([])
     plot_window = gl.GLViewWidget()
     plot_window.setCameraPosition(distance=50)
     plot_item = None
 
+    def dark_soliton(x, x_sol, rho, v):
+        healing_length = hbar/np.sqrt(2*m*rho*g)
+        v_sound = np.sqrt(rho*g/m)
+        soliton_width = healing_length/np.sqrt(1 - v**2/v_sound**2)
+        soliton_envelope = (1j*v/v_sound +
+                            np.sqrt(1 + v**2/v_sound**2) *
+                            np.tanh((x - x_sol)/(np.sqrt(2)*soliton_width)))
+        return soliton_envelope
+
     def run_sims():
         # import lineprofiler
         # lineprofiler.setup()
-        psi = initial()
+        import cPickle
+        if not os.path.exists('psi.pickle'):
+            psi = initial()
+            with open('psi.pickle', 'w') as f:
+                cPickle.dump(psi, f)
+        else:
+            with open('psi.pickle') as f:
+                psi = cPickle.load(f)
 
-        # k = 2*pi*5/(10e-6)
+        k = 2*pi*5/(10e-6)
         # # Give the condensate a kick:
-        # # psi *= np.exp(1j*k*x)
+        psi *= np.exp(1j*k*x)
 
-        # # print a soliton onto the condensate:
+        # print a soliton onto the condensate:
         # density = (psi.conj()*density_operator*psi).real
         # x_soliton = 5e-6
-        # rho_bg = density[np.abs(x-x_soliton)==np.abs(x-x_soliton).min()]
+        # rho_bg = density.max()#density[np.abs(x-x_soliton)==np.abs(x-x_soliton).min()]
         # v_soliton = 0#hbar*k/m
         # soliton_envelope = dark_soliton(x, x_soliton, rho_bg, v_soliton)
         # psi *= soliton_envelope
 
         # # psi = imaginary_evolution(psi)
-        # psi = evolution(psi)
+        psi = evolution(psi)
 
-    run_sims()
-    # inthread(run_sims)
+    # run_sims()
+    inthread(run_sims)
     qapplication.exec_()
 
 

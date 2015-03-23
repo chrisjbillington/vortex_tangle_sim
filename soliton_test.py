@@ -38,7 +38,7 @@ x_max = 15e-6
 
 # Finite elements:
 N = 7
-n_elements = 64
+n_elements = 48
 assert not (n_elements % 2), "Odd-even split step method requires an even number of elements"
 
 elements = FiniteElements1D(N, n_elements, x_min, x_max)
@@ -318,7 +318,7 @@ def evolution(psi):
 if __name__ == '__main__':
 
     time_of_last_plot = time.time()
-    target_frame_rate = 10
+    target_frame_rate = 20
 
     plot_window = pg.PlotWindow()
     abs_curve = None
@@ -330,13 +330,13 @@ if __name__ == '__main__':
 
         k = 2*pi*5/(10e-6)
         # Give the condensate a kick:
-        # psi *= np.exp(1j*k*x)
+        psi *= np.exp(1j*k*x)
 
         # print a soliton onto the condensate:
         density = (psi.conj()*density_operator*psi).real
         x_soliton = 5e-6
-        rho_bg = density[np.abs(x-x_soliton)==np.abs(x-x_soliton).min()]
-        v_soliton = 0#hbar*k/m
+        rho_bg = density[np.abs(x-x_soliton)==np.abs(x-x_soliton).min()].mean()
+        v_soliton = 0 # hbar*k/m
         soliton_envelope = dark_soliton(x, x_soliton, rho_bg, v_soliton)
         psi *= soliton_envelope
 
