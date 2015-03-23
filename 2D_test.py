@@ -8,6 +8,9 @@ from FEDVR import FiniteElements2D
 from PyQt4 import QtGui
 from qtutils import inthread, inmain_decorator
 
+from mpi4py import MPI
+
+
 def get_number_and_trap(rho_max, R):
     """Return the 1D normalisation constant N (units of atoms per unit area)
     and harmonic trap frequency omega that correspond to the Thomas-Fermi
@@ -30,19 +33,90 @@ N_2D, omega = get_number_and_trap(rho_max, R)  # 2D normalisation constant and h
                                                # corresponding to the desired maximum density and radius
 mu = g*rho_max                              # Chemical potential of the groundstate
 
-# Space:
-x_min = -10e-6
-x_max = 10e-6
-y_min = -10e-6
-y_max = 10e-6
+# Total spatial region over all MPI processes:
+x_min_global = -10e-6
+x_max_global = 10e-6
+y_min_global = -10e-6
+y_max_global = 10e-6
 
 # Finite elements:
-Nx = 9
-Ny = 9
-n_elements_x = 32
-n_elements_y = 32
-assert not (n_elements_x % 2), "Odd-even split step method requires an even number of elements"
-assert not (n_elements_y % 2), "Odd-even split step method requires an even number of elements"
+n_elements_x_global = 64
+n_elements_y_global = 64
+
+assert not (n_elements_x_global % 2), "Odd-even split step method requires an even number of elements"
+assert not (n_elements_y_global % 2), "Odd-even split step method requires an even number of elements"
+
+Nx = 7
+Ny = 7
+
+
+def initialise_MPI_grid():
+    # Split space up according to the number of processes we have
+
+
+    mpi_size = MPI.COMM_WORLD.Get_size()
+
+    # Only split up in the x direction for now:
+    mpi_dimensions = [mpi_size]
+
+    MPI_comm = MPI.COMM_WORLD.Create_cart(mpi_dimensions, periods=[True], reorder=True)
+    MPI_rank = MPI_comm.Get_rank()
+    MPI_x_coord, = MPI_comm.Get_coords(MPI_rank)
+    MPI_rank_left = MPI_comm.Get_cart_rank((MPI_x_coord - 1,))
+    MPI_rank_right = MPI_comm.Get_cart_rank((MPI_x_coord + 1,))
+
+    # We need an even number of elements in the x direction per process. So let's share them out.
+    elements_per_process, remaining_elements = (2*n for n in divmod(n_elements_x_global/2, mpi_size))
+
+    n_elements_x = int(elements_per_process)
+    if MPI_x_coord < remaining_elements/2:
+        # Give the remaining to the lowest ranked processes
+        n_elements_x += 2
+
+    # We only split along the x direction for now:
+    n_elements_y = n_elements_y_global
+
+    element_width = (x_max_global - x_min_global)/n_elements_x_global
+
+    # x_min is the sum of the sizes of the elements to our left:
+    x_min = x_min_global + elements_per_process*element_width*MPI_x_coord
+    # Including the extra ones that the low numbered ranks might have:
+    if MPI_x_coord < remaining_elements/2:
+        x_min += 2*MPI_x_coord*element_width
+    else:
+        x_min += remaining_elements*element_width
+
+    x_max = x_min + element_width*n_elements_x
+
+    # Not splitting up in the y_direction
+    y_min = y_min_global
+    y_max = y_max_global
+
+    return MPI_comm, MPI_rank_left, MPI_rank_right, n_elements_x, n_elements_y, x_min, x_max, y_min, y_max
+
+
+MPI_comm, MPI_rank_left, MPI_rank_right, n_elements_x, n_elements_y, x_min, x_max, y_min, y_max = initialise_MPI_grid()
+
+# The data we want to send left and right isn't in contiguous memory, so we
+# need to copy it into and out of temporary buffers. The buffers are also
+# useful since sometimes we receive once but then the information is required
+# multiple times - we'd have to hang onto it somewhere anyway, might as well
+# be here.
+MPI_left_send_buffer = np.zeros((Ny*n_elements_y), dtype=complex)
+MPI_left_receive_buffer = np.zeros((Ny*n_elements_y), dtype=complex)
+MPI_right_send_buffer = np.zeros((Ny*n_elements_y), dtype=complex)
+MPI_right_receive_buffer = np.zeros((Ny*n_elements_y), dtype=complex)
+
+# We need to tag our data because each process receives from two other
+# processes and needs to tell them apart:
+
+TAG_LEFT_TO_RIGHT = 0
+TAG_RIGHT_TO_LEFT = 1
+MPI_send_left = MPI_comm.Send_init(MPI_left_send_buffer, MPI_rank_left, tag=TAG_RIGHT_TO_LEFT)
+MPI_send_right = MPI_comm.Send_init(MPI_right_send_buffer, MPI_rank_right, tag=TAG_LEFT_TO_RIGHT)
+MPI_receive_left = MPI_comm.Recv_init(MPI_left_receive_buffer, MPI_rank_left, tag=TAG_LEFT_TO_RIGHT)
+MPI_receive_right = MPI_comm.Recv_init(MPI_right_receive_buffer, MPI_rank_right, tag=TAG_RIGHT_TO_LEFT)
+MPI_all_requests = [MPI_send_left, MPI_send_right, MPI_receive_left, MPI_receive_right]
 
 elements = FiniteElements2D(Nx, Ny, n_elements_x, n_elements_y, x_min, x_max, y_min, y_max)
 
@@ -91,6 +165,15 @@ def plot(psi, t=None, show=False):
         image_item.setData(rho_plot)
 
 
+def global_dot(vec1, vec2):
+    """"Dots two vectors and sums result over MPI processes"""
+    # Don't double count edges
+    local_dot = np.vdot(vec1[:, :, :-1, :-1], vec2[:, :, :-1, :-1]).real
+    local_dot = np.asarray(local_dot).reshape(1)
+    result = np.zeros(1)
+    MPI_comm.Allreduce(local_dot, result, MPI.SUM)
+    return result[0]
+
 
 def compute_mu(psi):
 
@@ -101,13 +184,21 @@ def compute_mu(psi):
     # x kinetic energy operator operating on psi.
     Kx_psi = np.einsum('ij,xyjl->xyil', Kx,  psi)
 
+    # Send and receive values at the boundaries to adjacent processes. We're
+    # sending as early as possible and we'll deal with the received data at
+    # the last possible moment, before calculating K_psi below, to reduce
+    # synchronisation overhead:
+    MPI_left_send_buffer[:] = Kx_psi[0, :, 0, :].reshape(n_elements_y * Ny)
+    MPI_right_send_buffer[:] = Kx_psi[-1, :, -1, :].reshape(n_elements_y * Ny)
+    MPI.Prequest.Startall(MPI_all_requests)
+
+
     # Add contributions from left to right across edges:
     Kx_psi[1:, :, 0, :] += Kx_psi[:-1, :, -1, :]
-    Kx_psi[0, :, 0, :] += Kx_psi[-1, :, -1, :] # Periodic boundary conditions
 
     # Copy summed values back from right to left across edges:
     Kx_psi[:-1, :, -1, :] = Kx_psi[1:, :, 0, :]
-    Kx_psi[-1, :, -1, :] = Kx_psi[0, :, 0, :]  # Periodic boundary conditions
+
 
     # y kinetic energy operator operating on psi.
     Ky_psi = np.einsum('kl,xyjl->xyjk', Ky,  psi)
@@ -120,12 +211,21 @@ def compute_mu(psi):
     Ky_psi[:, :-1, :, -1] = Ky_psi[:, 1:, :, 0]
     Ky_psi[:, -1, :, -1] = Ky_psi[:, 0, :, 0] # Periodic boundary conditions
 
+
+    # Now we need all Kx_psi values in order to calculate K_psi. Wait on
+    # communication of this data at the boundaries to complete:
+    MPI.Prequest.Waitall(MPI_all_requests)
+
+    # Add neighboring processes' contributioins to our x kinetic energy:
+    Kx_psi[0, :, 0, :] += MPI_left_receive_buffer.reshape((n_elements_y, Ny))
+    Kx_psi[-1, :, -1, :] += MPI_right_receive_buffer.reshape((n_elements_y, Ny))
+
+
     # Total kinetic energy operator operating on psi:
     K_psi = Kx_psi + Ky_psi
 
     # Total norm:
-    p = psi[:, :, :-1, :-1] # Don't double count edges
-    ncalc = np.vdot(p, p).real
+    ncalc = global_dot(psi, psi)
 
     # Total Hamaltonian:
     density = psi.conj()*density_operator*psi
@@ -133,8 +233,8 @@ def compute_mu(psi):
 
     # Expectation value and uncertainty of Hamiltonian gives the
     # expectation value and uncertainty of the chemical potential:
-    mu = np.vdot(p, H_psi[:, :, :-1, :-1]).real/ncalc
-    mu2 = np.vdot(H_psi[:, :, :-1, :-1], H_psi[:, :, :-1, :-1]).real/ncalc
+    mu = global_dot(psi, H_psi)/ncalc
+    mu2 = global_dot(H_psi, H_psi)/ncalc
     var_mu = mu2 - mu**2
     if var_mu < 0:
         u_mu = 0
@@ -144,16 +244,12 @@ def compute_mu(psi):
 
 
 def compute_number(psi):
-    # Total norm:
-    p = psi[:, :, :-1, :-1] # Don't double count edges
-    ncalc = np.vdot(p, p).real
-    return ncalc
+    return global_dot(psi, psi)
 
 
 def renormalise(psi):
     # imposing normalisation on the wavefunction:
-    p = psi[:, :, :-1, :-1] # Don't double count edges
-    ncalc = np.vdot(p, p)
+    ncalc = global_dot(psi, psi)
     psi[:] *= np.sqrt(N_2D/ncalc)
 
 
@@ -215,16 +311,25 @@ def initial():
                 # the edge points simultaneously:
                 Kx_psi[:, :, (0, -1), :] = np.einsum('ij,xyjl->xyil', Kx[(0, -1), :],  psi)
                 Kx_psi[:, :, :, (0, -1)] = np.einsum('ij,xyjl->xyil', Kx,  psi[:, :, :, (0, -1)])
+
+                # Send and receive values at the boundaries to adjacent processes. We're
+                # sending as early as possible and we'll deal with the received data at
+                # the last possible moment, before calculating K_psi below, to reduce
+                # synchronisation overhead:
+                MPI_left_send_buffer[:] = Kx_psi[0, :, 0, :].reshape(n_elements_y * Ny)
+                MPI_right_send_buffer[:] = Kx_psi[-1, :, -1, :].reshape(n_elements_y * Ny)
+                MPI.Prequest.Startall(MPI_all_requests)
+
+
                 Ky_psi[:, :, (0, -1), :] = np.einsum('kl,xyjl->xyjk', Ky,  psi[:, :, (0, -1), :])
                 Ky_psi[:, :, :, (0, -1)] = np.einsum('kl,xyjl->xyjk', Ky[(0, -1), :],  psi)
 
+
                 # Add contributions from left to right across edges:
                 Kx_psi[1:, :, 0, :] += Kx_psi[:-1, :, -1, :]
-                Kx_psi[0, :, 0, :] += Kx_psi[-1, :, -1, :] # Periodic boundary conditions
 
                 # Copy summed values back from right to left across edges:
                 Kx_psi[:-1, :, -1, :] = Kx_psi[1:, :, 0, :]
-                Kx_psi[-1, :, -1, :] = Kx_psi[0, :, 0, :]  # Periodic boundary conditions
 
                 # Add contributions from top to bottom across edges:
                 Ky_psi[:, 1:, :, 0] += Ky_psi[:, :-1, :, -1]
@@ -233,6 +338,14 @@ def initial():
                 # Copy summed values back from bottom to top across edges:
                 Ky_psi[:, :-1, :, -1] = Ky_psi[:, 1:, :, 0]
                 Ky_psi[:, -1, :, -1] = Ky_psi[:, 0, :, 0] # Periodic boundary conditions
+
+                # Now we need all Kx_psi values in order to calculate K_psi. Wait on
+                # communication of this data at the boundaries to complete:
+                MPI.Prequest.Waitall(MPI_all_requests)
+                # Add neighboring processes' contributioins to our x kinetic energy:
+                Kx_psi[0, :, 0, :] += MPI_left_receive_buffer.reshape((n_elements_y, Ny))
+                Kx_psi[-1, :, -1, :] += MPI_right_receive_buffer.reshape((n_elements_y, Ny))
+
             else:
                 # Internal DVR points we actually do do one at a time:
                 Kx_psi[:, :, j, k] = np.einsum('j,xyj->xy', Kx[j, :],  psi[:, :, :, k])
@@ -352,7 +465,7 @@ def evolution(psi, t_final, dt=None, imaginary_time=False):
         # Evolve odd (in y direction) elements for half a step with y kinetic energy evolution operator:
         psi[:, odd_elements_y, :, :] = np.einsum('kl,xyjl->xyjk', U_Ky_halfstep, psi[:, odd_elements_y, :, :])
 
-        # Copy odd endpoints -> adjacent even endpoints in x direction:
+        # Copy odd endpoints -> adjacent even endpoints in y direction:
         psi[:, even_elements_y, :, -1] = psi[:, odd_elements_y, :, 0]
         psi[:, even_internal_elements_y, :, 0] = psi[:, odd_internal_elements_y, :, -1]
         psi[:, 0, :, 0] = psi[:, -1, :, -1] # periodic boundary conditions
@@ -360,9 +473,9 @@ def evolution(psi, t_final, dt=None, imaginary_time=False):
         # Evolve even (in y direction) elements for a full step with y kinetic energy evolution operator:
         psi[:, even_elements_y, :, :] = np.einsum('kl,xyjl->xyjk', U_Ky_fullstep, psi[:, even_elements_y, :, :])
 
-        # Copy even endpoints -> adjacent odd endpoints in x direction:
+        # Copy even endpoints -> adjacent odd endpoints in y direction:
         psi[:, odd_internal_elements_y, :, -1] = psi[:, even_internal_elements_y, :, 0]
-        psi[:, odd_elements_y, :, 0] = psi[:, even_elements_x, :, -1]
+        psi[:, odd_elements_y, :, 0] = psi[:, even_elements_y, :, -1]
         psi[:, -1, :, -1] = psi[:, 0, :, 0] # periodic boundary conditions
 
         # Evolve odd (in y direction) elements for half a step with y kinetic energy evolution operator:
@@ -437,7 +550,7 @@ if __name__ == '__main__':
         # import lineprofiler
         # lineprofiler.setup()
         import cPickle
-        if not os.path.exists('FEDVR_initial.pickle'):
+        if True: # not os.path.exists('FEDVR_initial.pickle'):
             psi = initial()
             with open('FEDVR_initial.pickle', 'w') as f:
                 cPickle.dump(psi, f)
@@ -457,26 +570,26 @@ if __name__ == '__main__':
         # soliton_envelope = dark_soliton(x, x_soliton, rho_bg, v_soliton)
         # psi *= soliton_envelope
 
-        if not os.path.exists('FEDVR_vortices.pickle'):
-            # Scatter some vortices randomly about:
-            for i in range(30):
-                x_vortex = np.random.normal(0, scale=R)
-                y_vortex = np.random.normal(0, scale=R)
-                psi[:] *= np.exp(1j*np.arctan2(y - y_vortex, x - x_vortex))
+        # if True: #not os.path.exists('FEDVR_vortices.pickle'):
+        #     # Scatter some vortices randomly about:
+        #     for i in range(30):
+        #         x_vortex = np.random.normal(0, scale=R)
+        #         y_vortex = np.random.normal(0, scale=R)
+        #         psi[:] *= np.exp(1j*np.arctan2(y - y_vortex, x - x_vortex))
 
 
-            psi = evolution(psi, t_final=400e-6, imaginary_time=True)
+        #     psi = evolution(psi, t_final=400e-6, imaginary_time=True)
 
-            with open('FEDVR_vortices.pickle', 'w') as f:
-                cPickle.dump(psi, f)
-        else:
-            with open('FEDVR_vortices.pickle') as f:
-                psi = cPickle.load(f)
-        psi = evolution(psi, dt=2e-7, t_final=np.inf)
+        #     with open('FEDVR_vortices.pickle', 'w') as f:
+        #         cPickle.dump(psi, f)
+        # else:
+        #     with open('FEDVR_vortices.pickle') as f:
+        #         psi = cPickle.load(f)
+        # psi = evolution(psi, dt=2e-7, t_final=np.inf)
 
 
-    # run_sims()
-    inthread(run_sims)
-    qapplication.exec_()
+    run_sims()
+    # inthread(run_sims)
+    # qapplication.exec_()
 
 
