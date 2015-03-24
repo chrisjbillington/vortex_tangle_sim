@@ -40,8 +40,8 @@ y_min_global = -10e-6
 y_max_global = 10e-6
 
 # Finite elements:
-n_elements_x_global = 86
-n_elements_y_global = 86
+n_elements_x_global = 32
+n_elements_y_global = 32
 
 assert not (n_elements_x_global % 2), "Odd-even split step method requires an even number of elements"
 assert not (n_elements_y_global % 2), "Odd-even split step method requires an even number of elements"
@@ -458,11 +458,9 @@ def evolution(psi, t_final, dt=None, imaginary_time=False):
 
     global time_of_last_plot
     if dt is None:
-        dx_max = np.diff(x[0, 0, :, 0]).max()
         dx_min = np.diff(x[0, 0, :, 0]).min()
-        dy_max = np.diff(y[0, 0, 0, :]).max()
         dy_min = np.diff(y[0, 0, 0, :]).min()
-        dt = max(dx_max, dy_max) * min(dx_min, dy_min) * m / (8 * pi * hbar)
+        dt = min(dx_min, dy_min)**2 * m / (2 * pi * hbar)
         print('using dt = ', dt)
     n_initial = compute_number(psi)
     mu_initial, unc_mu_inintial = compute_mu(psi)
@@ -557,7 +555,7 @@ def evolution(psi, t_final, dt=None, imaginary_time=False):
 
 if __name__ == '__main__':
 
-    SHOW_PLOT = False
+    SHOW_PLOT = True
     if SHOW_PLOT:
         import pyqtgraph as pg
 
@@ -583,7 +581,8 @@ if __name__ == '__main__':
         vortices_filename = 'cache/FEDVR_vortices_(rank_%dof%d_%dx%d).pickle'%specs
 
         # import lineprofiler
-        # lineprofiler.setup()
+        # lineprofiler.setup(outfile='lineprofile-%d.txt'%MPI_rank)
+
         import cPickle
         if not os.path.exists(initial_filename):
             psi = initial()
