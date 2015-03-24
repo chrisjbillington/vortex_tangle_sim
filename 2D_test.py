@@ -40,8 +40,8 @@ y_min_global = -10e-6
 y_max_global = 10e-6
 
 # Finite elements:
-n_elements_x_global = 32
-n_elements_y_global = 32
+n_elements_x_global = 86
+n_elements_y_global = 86
 
 assert not (n_elements_x_global % 2), "Odd-even split step method requires an even number of elements"
 assert not (n_elements_y_global % 2), "Odd-even split step method requires an even number of elements"
@@ -155,11 +155,12 @@ V = 0.5*m*omega**2*(x**2 + y**2)
 
 @inmain_decorator()
 def plot(psi, t=None, show=False):
-    x_plot, y_plot, psi_interp = elements.interpolate_vector(psi, Nx, Ny)
-    rho_plot = np.abs(psi_interp)**2
-    phase_plot = np.angle(psi_interp)
-    density_image_view.setImage(rho_plot)
-    phase_image_view.setImage(phase_plot)
+    if SHOW_PLOT:
+        x_plot, y_plot, psi_interp = elements.interpolate_vector(psi, Nx, Ny)
+        rho_plot = np.abs(psi_interp)**2
+        phase_plot = np.angle(psi_interp)
+        density_image_view.setImage(rho_plot)
+        phase_image_view.setImage(phase_plot)
 
 
 def global_dot(vec1, vec2):
@@ -556,37 +557,30 @@ def evolution(psi, t_final, dt=None, imaginary_time=False):
 
 if __name__ == '__main__':
 
-    import pyqtgraph as pg
+    SHOW_PLOT = False
+    if SHOW_PLOT:
+        import pyqtgraph as pg
 
-    time_of_last_plot = time.time()
-    target_frame_rate = 1
+        time_of_last_plot = time.time()
+        target_frame_rate = 1
 
-    qapplication = QtGui.QApplication([])
-    win = QtGui.QWidget()
-    win.resize(800,800)
-    density_image_view = pg.ImageView()
-    phase_image_view = pg.ImageView()
-    layout = QtGui.QVBoxLayout(win)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(0)
-    layout.addWidget(density_image_view)
-    layout.addWidget(phase_image_view)
-    win.show()
-    win.setWindowTitle('MPI task %d'%MPI_rank)
-
-    def dark_soliton(x, x_sol, rho, v):
-        healing_length = hbar/np.sqrt(2*m*rho*g)
-        v_sound = np.sqrt(rho*g/m)
-        soliton_width = healing_length/np.sqrt(1 - v**2/v_sound**2)
-        soliton_envelope = (1j*v/v_sound +
-                            np.sqrt(1 + v**2/v_sound**2) *
-                            np.tanh((x - x_sol)/(np.sqrt(2)*soliton_width)))
-        return soliton_envelope
+        qapplication = QtGui.QApplication([])
+        win = QtGui.QWidget()
+        win.resize(800,800)
+        density_image_view = pg.ImageView()
+        phase_image_view = pg.ImageView()
+        layout = QtGui.QVBoxLayout(win)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(density_image_view)
+        layout.addWidget(phase_image_view)
+        win.show()
+        win.setWindowTitle('MPI task %d'%MPI_rank)
 
     def run_sims():
-        initial_filename = 'FEDVR_initial_(rank_%dof%d).pickle'%(MPI_rank, MPI_size)
-        vortices_filename = 'FEDVR_vortices_(rank_%dof%d).pickle'%(MPI_rank, MPI_size)
-
+        specs = (MPI_rank, MPI_size, n_elements_x_global, n_elements_y_global)
+        initial_filename = 'cache/FEDVR_initial_(rank_%dof%d_%dx%d).pickle'%specs
+        vortices_filename = 'cache/FEDVR_vortices_(rank_%dof%d_%dx%d).pickle'%specs
 
         # import lineprofiler
         # lineprofiler.setup()
@@ -623,8 +617,11 @@ if __name__ == '__main__':
         psi = evolution(psi, t_final=np.inf)
 
 
-    # run_sims()
-    inthread(run_sims)
-    qapplication.exec_()
+    if SHOW_PLOT:
+        inthread(run_sims)
+        qapplication.exec_()
+    else:
+        run_sims()
+
 
 

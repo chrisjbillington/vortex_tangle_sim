@@ -34,8 +34,11 @@ x_max = 10e-6
 y_min = -10e-6
 y_max = 10e-6
 
-x = np.linspace(x_min, x_max, 256, endpoint=False)
-y = np.linspace(y_min, y_max, 256, endpoint=False)
+nx = 512
+ny = 512
+
+x = np.linspace(x_min, x_max, nx, endpoint=False)
+y = np.linspace(y_min, y_max, ny, endpoint=False)
 X,Y = np.meshgrid(x,y)
 
 dx = x[1]-x[0]
@@ -54,12 +57,11 @@ V = 0.5*m*omega**2*(X**2 + Y**2)
 
 @inmain_decorator()
 def plot(i, t, psi):
-    global image_item
-    rho_plot = np.abs(psi)**2
-    if image_item is None:
-        image_item = image_view.setImage(rho_plot)
-    else:
-        image_item.setData(rho_plot)
+    if SHOW_PLOT:
+        rho_plot = np.abs(psi)**2
+        phase_plot = np.angle(psi)
+        density_image_view.setImage(rho_plot)
+        phase_image_view.setImage(phase_plot)
 
 
 def compute_mu(psi):
@@ -102,15 +104,16 @@ def initial(psi, dt, t_final):
 
         return d_psi_dt
 
-    def check_convergence(i,t,psi):
+    def check_convergence_and_plot(i,t,psi):
         mucalc, u_mucalc = compute_mu(psi)
         convergence = abs(u_mucalc/mucalc)
         print(i, t, mucalc, convergence, 1e3*(time.time() - start_time)/(i+1), 'msps')
+        plot(i, t, psi)
 
     # Creating a dictionary of triggers that will be called repeatedly during integration. The function
     # renormalise will be called every step, and the function output.sample will be called every 50
     # steps:
-    routines = {1: renormalise, 10: plot, 100:check_convergence}
+    routines = {1: renormalise, 100:check_convergence_and_plot}
 
     # Start the integration:
     start_time = time.time()
@@ -159,52 +162,62 @@ def evolution(psi, dt, t_final):
 
 if __name__ == '__main__':
 
-    import pyqtgraph as pg
+    SHOW_PLOT = False
+    if SHOW_PLOT:
+        import pyqtgraph as pg
 
-    qapplication = QtGui.QApplication([])
-    win = QtGui.QMainWindow()
-    win.resize(800,800)
-    image_view = pg.ImageView()
-    image_item = None
-    win.setCentralWidget(image_view)
-    win.show()
-    win.setWindowTitle('pyqtgraph example: ImageView')
+        qapplication = QtGui.QApplication([])
+        win = QtGui.QWidget()
+        win.resize(800,800)
+        density_image_view = pg.ImageView()
+        phase_image_view = pg.ImageView()
+        layout = QtGui.QVBoxLayout(win)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(density_image_view)
+        layout.addWidget(phase_image_view)
+        win.show()
+        win.setWindowTitle('FFT method')
 
     def run_sims():
-        import lineprofiler
-        lineprofiler.setup()
         import cPickle as pickle
+        specs = (nx, ny)
+        initial_filename = 'cache/FFT_initial_(%dx%d).pickle'%specs
+        vortices_filename = 'cache/FFT_vortices_(%dx%d).pickle'%specs
 
-        if not os.path.exists('initial_fft.pickle'):
+        if not os.path.exists(initial_filename):
             # Initial guess:
             sigmaguess = 0.5*R
             psi = np.sqrt(N_2D/(2 * pi * sigmaguess**2)) * np.exp(-((X)**2 + (Y)**2)/(4 * sigmaguess**2))
+            psi = np.array(psi, dtype=complex)
             renormalise(None, None, psi)
-            psi = initial(psi, dt=5e-7, t_final=30e-3)
-            with open('initial_fft.pickle', 'w') as f:
-                psi = pickle.dump(psi, f)
+            while True:
+                psi = initial(psi, dt=2e-7, t_final=1e-3)
+                with open(initial_filename, 'w') as f:
+                    pickle.dump(psi, f)
         else:
-            with open('initial_fft.pickle') as f:
+            with open(initial_filename) as f:
                 psi = pickle.load(f)
 
-        psi = np.array(psi, dtype=complex)
-
-        if not os.path.exists('vortices_fft.pickle'):
-            # Scatter some vortices randomly about:
+        if not os.path.exists(vortices_filename):
+            np.random.seed(42)
+            # Scatter some vortices randomly about.
             for i in range(30):
+                sign = np.sign(np.random.normal())
                 x_vortex = np.random.normal(0, scale=R)
                 y_vortex = np.random.normal(0, scale=R)
-                psi[:] *= np.exp(1j*np.arctan2(Y - y_vortex, X - x_vortex))
-            print('doing a thing')
-            psi = initial(psi, dt=1e-7, t_final=400e-6)
-            with open('vortices_fft.pickle', 'w') as f:
-                psi = pickle.dump(psi, f)
+                psi[:] *= np.exp(sign * 1j*np.arctan2(Y - y_vortex, X - x_vortex))
+            psi = initial(psi, dt=5.86e-8, t_final=400e-6)
+            with open(vortices_filename, 'w') as f:
+                pickle.dump(psi, f)
         else:
-            with open('vortices_fft.pickle') as f:
+            with open(vortices_filename) as f:
                 psi = pickle.load(f)
-        psi = evolution(psi, dt=2e-7, t_final=np.inf)
+        psi = evolution(psi, dt=5.86e-8, t_final=np.inf)
 
 
-    # run_sims()
-    inthread(run_sims)
-    qapplication.exec_()
+    if SHOW_PLOT:
+        inthread(run_sims)
+        qapplication.exec_()
+    else:
+        run_sims()
