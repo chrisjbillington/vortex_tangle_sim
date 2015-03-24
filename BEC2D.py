@@ -170,7 +170,7 @@ class BEC2DSimulator(object):
 
         return Kx_psi + Ky_psi
 
-    def compute_mu(self, psi, V):
+    def compute_mu(self, psi, V, uncertainty=False):
         """Calculate chemical potential of DVR basis wavefunction psi with
         potential V"""
 
@@ -187,13 +187,16 @@ class BEC2DSimulator(object):
         # Expectation value and uncertainty of Hamiltonian gives the
         # expectation value and uncertainty of the chemical potential:
         mucalc = self.global_dot(psi, H_psi)/ncalc
-        mu2calc = self.global_dot(H_psi, H_psi)/ncalc
-        var_mucalc = mu2calc - mucalc**2
-        if var_mucalc < 0:
-            u_mucalc = 0
+        if uncertainty:
+            mu2calc = self.global_dot(H_psi, H_psi)/ncalc
+            var_mucalc = mu2calc - mucalc**2
+            if var_mucalc < 0:
+                u_mucalc = 0
+            else:
+                u_mucalc = np.sqrt(var_mucalc)
+            return mucalc, u_mucalc
         else:
-            u_mucalc = np.sqrt(var_mucalc)
-        return mucalc, u_mucalc/mucalc
+            return mucalc
 
     def compute_energy(self, psi, V):
         """Calculate total energy of DVR basis wavefunction psi with
@@ -202,14 +205,12 @@ class BEC2DSimulator(object):
         # Total kinetic energy operator operating on psi:
         K_psi = self.compute_K_psi(psi)
 
+        density = psi.conj() * self.density_operator * psi
+
         # Total energy operator. Differs from total Hamiltonian in that the
         # nonlinear term is halved in order to avoid double counting the
         # interaction energy:
-        density = psi.conj() * self.density_operator * psi
         E_total_psi = K_psi + (V + 0.5*self.g * density) * psi
-
-        # Expectation value and uncertainty of Hamiltonian gives the
-        # expectation value and uncertainty of the chemical potential:
         Ecalc = self.global_dot(psi, E_total_psi)
         return Ecalc
 
@@ -259,7 +260,7 @@ class BEC2DSimulator(object):
             for k in range(1, self.Ny-1):
                 points_and_indices.append(((j_indices == j) & (k_indices == k), j, k))
 
-        mucalc, u_mucalc = self.compute_mu(psi, V)
+        mucalc = self.compute_mu(psi, V)
         start_time = time.time()
         while True:
             # We operate on all elements at once, but only some DVR basis functions at a time.
@@ -318,7 +319,7 @@ class BEC2DSimulator(object):
             if callback_func is not None and not i % callback_period:
                 callback_func(i, psi)
             if not i % print_period:
-                mucalc, u_mucalc = self.compute_mu(psi, V)
+                mucalc = self.compute_mu(psi, V)
                 convergence_calc = abs((mucalc - mu)/mu)
                 print(i, 'mu:', mu, 'mucalc:', mucalc,
                       'convergence:', convergence_calc,
@@ -344,7 +345,7 @@ class BEC2DSimulator(object):
         print('using dt = ', dt)
 
         n_initial = self.compute_number(psi)
-        mu_initial, u_mu_inintial = self.compute_mu(psi, V)
+        mu_initial = self.compute_mu(psi, V)
 
         E_initial = self.compute_energy(psi, V)
 
