@@ -40,8 +40,8 @@ y_min_global = -10e-6
 y_max_global = 10e-6
 
 # Finite elements:
-n_elements_x_global = 64
-n_elements_y_global = 64
+n_elements_x_global = 32
+n_elements_y_global = 32
 
 assert not (n_elements_x_global % 2), "Odd-even split step method requires an even number of elements"
 assert not (n_elements_y_global % 2), "Odd-even split step method requires an even number of elements"
@@ -54,10 +54,10 @@ def initialise_MPI_grid():
     # Split space up according to the number of processes we have
 
 
-    mpi_size = MPI.COMM_WORLD.Get_size()
+    MPI_size = MPI.COMM_WORLD.Get_size()
 
     # Only split up in the x direction for now:
-    mpi_dimensions = [mpi_size]
+    mpi_dimensions = [MPI_size]
 
     MPI_comm = MPI.COMM_WORLD.Create_cart(mpi_dimensions, periods=[True], reorder=True)
     MPI_rank = MPI_comm.Get_rank()
@@ -66,7 +66,7 @@ def initialise_MPI_grid():
     MPI_rank_right = MPI_comm.Get_cart_rank((MPI_x_coord + 1,))
 
     # We need an even number of elements in the x direction per process. So let's share them out.
-    elements_per_process, remaining_elements = (2*n for n in divmod(n_elements_x_global/2, mpi_size))
+    elements_per_process, remaining_elements = (2*n for n in divmod(n_elements_x_global/2, MPI_size))
 
     n_elements_x = int(elements_per_process)
     if MPI_x_coord < remaining_elements/2:
@@ -92,16 +92,14 @@ def initialise_MPI_grid():
     y_min = y_min_global
     y_max = y_max_global
 
-    return MPI_comm, MPI_rank_left, MPI_rank_right, n_elements_x, n_elements_y, x_min, x_max, y_min, y_max
+    return MPI_comm, MPI_size, MPI_rank, MPI_rank_left, MPI_rank_right, n_elements_x, n_elements_y, x_min, x_max, y_min, y_max
 
 
-MPI_comm, MPI_rank_left, MPI_rank_right, n_elements_x, n_elements_y, x_min, x_max, y_min, y_max = initialise_MPI_grid()
+(MPI_comm, MPI_size, MPI_rank, MPI_rank_left, MPI_rank_right,
+     n_elements_x, n_elements_y, x_min, x_max, y_min, y_max) = initialise_MPI_grid()
 
 # The data we want to send left and right isn't in contiguous memory, so we
-# need to copy it into and out of temporary buffers. The buffers are also
-# useful since sometimes we receive once but then the information is required
-# multiple times - we'd have to hang onto it somewhere anyway, might as well
-# be here.
+# need to copy it into and out of temporary buffers:
 MPI_left_send_buffer = np.zeros((Ny*n_elements_y), dtype=complex)
 MPI_left_receive_buffer = np.zeros((Ny*n_elements_y), dtype=complex)
 MPI_right_send_buffer = np.zeros((Ny*n_elements_y), dtype=complex)
@@ -109,7 +107,6 @@ MPI_right_receive_buffer = np.zeros((Ny*n_elements_y), dtype=complex)
 
 # We need to tag our data because each process receives from two other
 # processes and needs to tell them apart:
-
 TAG_LEFT_TO_RIGHT = 0
 TAG_RIGHT_TO_LEFT = 1
 MPI_send_left = MPI_comm.Send_init(MPI_left_send_buffer, MPI_rank_left, tag=TAG_RIGHT_TO_LEFT)
@@ -117,6 +114,9 @@ MPI_send_right = MPI_comm.Send_init(MPI_right_send_buffer, MPI_rank_right, tag=T
 MPI_receive_left = MPI_comm.Recv_init(MPI_left_receive_buffer, MPI_rank_left, tag=TAG_LEFT_TO_RIGHT)
 MPI_receive_right = MPI_comm.Recv_init(MPI_right_receive_buffer, MPI_rank_right, tag=TAG_RIGHT_TO_LEFT)
 MPI_all_requests = [MPI_send_left, MPI_send_right, MPI_receive_left, MPI_receive_right]
+MPI_left_to_right_requests = [MPI_send_right, MPI_receive_left]
+MPI_right_to_left_requests = [MPI_send_left, MPI_receive_right]
+
 
 elements = FiniteElements2D(Nx, Ny, n_elements_x, n_elements_y, x_min, x_max, y_min, y_max)
 
@@ -152,17 +152,14 @@ y = elements.points_Y
 # The Harmonic trap at our gridpoints, (n_elements x N):
 V = 0.5*m*omega**2*(x**2 + y**2)
 
+
 @inmain_decorator()
 def plot(psi, t=None, show=False):
-    global image_item
-
     x_plot, y_plot, psi_interp = elements.interpolate_vector(psi, Nx, Ny)
     rho_plot = np.abs(psi_interp)**2
-
-    if image_item is None:
-        image_item = image_view.setImage(rho_plot)
-    else:
-        image_item.setData(rho_plot)
+    phase_plot = np.angle(psi_interp)
+    density_image_view.setImage(rho_plot)
+    phase_image_view.setImage(phase_plot)
 
 
 def global_dot(vec1, vec2):
@@ -216,7 +213,7 @@ def compute_mu(psi):
     # communication of this data at the boundaries to complete:
     MPI.Prequest.Waitall(MPI_all_requests)
 
-    # Add neighboring processes' contributioins to our x kinetic energy:
+    # Add neighbouring processes' contributions to our x kinetic energy:
     Kx_psi[0, :, 0, :] += MPI_left_receive_buffer.reshape((n_elements_y, Ny))
     Kx_psi[-1, :, -1, :] += MPI_right_receive_buffer.reshape((n_elements_y, Ny))
 
@@ -386,6 +383,78 @@ def initial():
 
 def evolution(psi, t_final, dt=None, imaginary_time=False):
 
+    def copy_x_edges_odd_to_even(psi):
+        """Copy odd endpoints -> adjacent even endpoints in x direction,
+        including to and from adjacent MPI tasks:"""
+        # Send values to the right and and receive from the left adjacent
+        # processes. We're sending as early as possible and we'll deal with
+        # the received data after doing other internal copying that we need to
+        # do anyway (this minimises synchronisation overhead). The first
+        # element in the x direction, number 0, is even, so we need to receive
+        # into it but not send. The last element, number n_elements_x - 1, is
+        # odd, so we need to send from it.
+
+        # TODO: If there is still too much latency from this, split up the
+        # einsum line in the main loop to do the edge elements first, then
+        # initiate communication before doing einsum on all the internal
+        # elements.
+        MPI_right_send_buffer[:] = psi[-1, :, -1, :].reshape(n_elements_y * Ny)
+        MPI.Prequest.Startall(MPI_left_to_right_requests)
+
+        # Copy values from odd -> even elements at internal edges in x direction:
+        psi[even_elements_x, :, -1, :] = psi[odd_elements_x, :, 0, :]
+        psi[even_internal_elements_x, :, 0, :] = psi[odd_internal_elements_x, :, -1, :]
+
+
+        # Now is the latest we can wait without the data from adjacent
+        # processes. Wait for communication to complete:
+        MPI.Prequest.Waitall(MPI_left_to_right_requests)
+        # Copy over neighbouring process's value for psi at the boundary:
+        psi[0, :, 0, :] = MPI_left_receive_buffer.reshape((n_elements_y, Ny))
+
+    def copy_x_edges_even_to_odd(psi):
+        """Copy even endpoints -> adjacent odd endpoints in x direction,
+        including to and from adjacent MPI tasks:"""
+        # Send values to the left and and receive from the right adjacent
+        # processes. We're sending as early as possible and we'll deal with
+        # the received data after doing other internal copying that we need to
+        # do anyway (this minimises synchronisation overhead). The first
+        # element in the x direction, number 0, is even, so we need to send
+        # from it but not receive. The last element, number n_elements_x - 1, is
+        # odd, so we need to receive into it.
+
+        # TODO: If there is still too much latency from this, split up the
+        # einsum line in the main loop to do the edge elements first, then
+        # initiate communication before doing einsum on all the internal
+        # elements.
+        MPI_left_send_buffer[:] = psi[0, :, 0, :].reshape(n_elements_y * Ny)
+        MPI.Prequest.Startall(MPI_right_to_left_requests)
+
+        # Copy values from even -> odd elements at internal edges in x direction:
+        psi[odd_internal_elements_x, :, -1, :] = psi[even_internal_elements_x, :, 0, :]
+        psi[odd_elements_x, :, 0, :] = psi[even_elements_x, :, -1, :]
+
+
+        # Now is the latest we can wait without the data from adjacent
+        # processes. Wait for communication to complete:
+        MPI.Prequest.Waitall(MPI_right_to_left_requests)
+        # Copy over neighbouring process's value for psi at the boundary:
+        psi[-1, :, -1, :] = MPI_right_receive_buffer.reshape((n_elements_y, Ny))
+
+    def copy_y_edges_odd_to_even(psi):
+        """Copy odd endpoints -> adjacent even endpoints in y direction. The y
+        dimension is not split among MPI tasks, so there is no IPC here."""
+        psi[:, even_elements_y, :, -1] = psi[:, odd_elements_y, :, 0]
+        psi[:, even_internal_elements_y, :, 0] = psi[:, odd_internal_elements_y, :, -1]
+        psi[:, 0, :, 0] = psi[:, -1, :, -1] # periodic boundary conditions
+
+    def copy_y_edges_even_to_odd(psi):
+        """Copy even endpoints -> adjacent odd endpoints in y direction. The y
+        dimension is not split among MPI tasks, so there is no IPC here."""
+        psi[:, odd_internal_elements_y, :, -1] = psi[:, even_internal_elements_y, :, 0]
+        psi[:, odd_elements_y, :, 0] = psi[:, even_elements_y, :, -1]
+        psi[:, -1, :, -1] = psi[:, 0, :, 0] # periodic boundary conditions
+
     global time_of_last_plot
     if dt is None:
         dx_max = np.diff(x[0, 0, :, 0]).max()
@@ -424,7 +493,7 @@ def evolution(psi, t_final, dt=None, imaginary_time=False):
     if imaginary_time:
         U_V_halfstep = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
     else:
-        U_V_halfstep = np.exp(-1j/hbar * (g * density + V) * dt/2)
+        U_V_halfstep = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
 
     i = 0
     t = 0
@@ -435,57 +504,21 @@ def evolution(psi, t_final, dt=None, imaginary_time=False):
         # Evolve for half a step with potential evolution operator:
         psi[:] = U_V_halfstep*psi
 
-
-        # Evolve odd (in x direction) elements for half a step with x kinetic energy evolution operator:
+        # Evolution with x kinetic energy evolution operator, using odd-even-odd split step method:
         psi[odd_elements_x, :, :, :] = np.einsum('ij,xyjl->xyil', U_Kx_halfstep, psi[odd_elements_x, :, :, :])
-
-        # Copy odd endpoints -> adjacent even endpoints in x direction:
-        psi[even_elements_x, :, -1, :] = psi[odd_elements_x, :, 0, :]
-        psi[even_internal_elements_x, :, 0, :] = psi[odd_internal_elements_x, :, -1, :]
-        psi[0, :, 0, :] = psi[-1, :, -1, :] # periodic boundary conditions
-
-        # Evolve even (in x direction) elements for a full step with x kinetic energy evolution operator:
+        copy_x_edges_odd_to_even(psi)
         psi[even_elements_x, :, :, :] = np.einsum('ij,xyjl->xyil', U_Kx_fullstep, psi[even_elements_x, :, :, :])
-
-        # Copy even endpoints -> adjacent odd endpoints in x direction:
-        psi[odd_internal_elements_x, :, -1, :] = psi[even_internal_elements_x, :, 0, :]
-        psi[odd_elements_x, :, 0, :] = psi[even_elements_x, :, -1, :]
-        psi[-1, :, -1, :] = psi[0, :, 0, :] # periodic boundary conditions
-
-        # Evolve odd (in x direction) elements for half a step with x kinetic energy evolution operator:
+        copy_x_edges_even_to_odd(psi)
         psi[odd_elements_x, :, :, :] = np.einsum('ij,xyjl->xyil', U_Kx_halfstep, psi[odd_elements_x, :, :, :])
+        copy_x_edges_odd_to_even(psi)
 
-        # Copy odd endpoints -> adjacent even endpoints in x direction:
-        psi[even_elements_x, :, -1, :] = psi[odd_elements_x, :, 0, :]
-        psi[even_internal_elements_x, :, 0, :] = psi[odd_internal_elements_x, :, -1, :]
-        psi[0, :, 0, :] = psi[-1, :, -1, :] # periodic boundary conditions
-
-
-
-        # Evolve odd (in y direction) elements for half a step with y kinetic energy evolution operator:
+        # Evolution with y kinetic energy evolution operator, using odd-even-odd split step method:
         psi[:, odd_elements_y, :, :] = np.einsum('kl,xyjl->xyjk', U_Ky_halfstep, psi[:, odd_elements_y, :, :])
-
-        # Copy odd endpoints -> adjacent even endpoints in y direction:
-        psi[:, even_elements_y, :, -1] = psi[:, odd_elements_y, :, 0]
-        psi[:, even_internal_elements_y, :, 0] = psi[:, odd_internal_elements_y, :, -1]
-        psi[:, 0, :, 0] = psi[:, -1, :, -1] # periodic boundary conditions
-
-        # Evolve even (in y direction) elements for a full step with y kinetic energy evolution operator:
+        copy_y_edges_odd_to_even(psi)
         psi[:, even_elements_y, :, :] = np.einsum('kl,xyjl->xyjk', U_Ky_fullstep, psi[:, even_elements_y, :, :])
-
-        # Copy even endpoints -> adjacent odd endpoints in y direction:
-        psi[:, odd_internal_elements_y, :, -1] = psi[:, even_internal_elements_y, :, 0]
-        psi[:, odd_elements_y, :, 0] = psi[:, even_elements_y, :, -1]
-        psi[:, -1, :, -1] = psi[:, 0, :, 0] # periodic boundary conditions
-
-        # Evolve odd (in y direction) elements for half a step with y kinetic energy evolution operator:
+        copy_y_edges_even_to_odd(psi)
         psi[:, odd_elements_y, :, :] = np.einsum('kl,xyjl->xyjk', U_Ky_halfstep, psi[:, odd_elements_y, :, :])
-
-        # Copy odd endpoints -> adjacent even endpoints in x direction:
-        psi[:, even_elements_y, :, -1] = psi[:, odd_elements_y, :, 0]
-        psi[:, even_internal_elements_y, :, 0] = psi[:, odd_internal_elements_y, :, -1]
-        psi[:, 0, :, 0] = psi[:, -1, :, -1] # periodic boundary conditions
-
+        copy_y_edges_odd_to_even(psi)
 
         # Calculate potential energy evolution operator for half a step
         if imaginary_time:
@@ -494,7 +527,7 @@ def evolution(psi, t_final, dt=None, imaginary_time=False):
         if imaginary_time:
             U_V_halfstep[:] = np.exp(-1/hbar * (g * density + V - mu) * dt/2)
         else:
-            U_V_halfstep[:] = np.exp(-1j/hbar * (g * density + V) * dt/2)
+            U_V_halfstep[:] = np.exp(-1j/hbar * (g * density + V - mu) * dt/2)
 
         # Evolve for half a timestep with potential evolution operator:
         psi[:] = U_V_halfstep*psi
@@ -512,8 +545,8 @@ def evolution(psi, t_final, dt=None, imaginary_time=False):
                   round(1e3/step_rate, 1), 'msps',
                   round(frame_rate, 1), 'fps')
         # if (time.time() - time_of_last_plot) > 1/target_frame_rate:
-            if imaginary_time:
-                renormalise(psi)
+            # if imaginary_time:
+            #     renormalise(psi)
             plot(psi, t, show=False)
             n_frames += 1
             time_of_last_plot = time.time()
@@ -529,13 +562,17 @@ if __name__ == '__main__':
     target_frame_rate = 1
 
     qapplication = QtGui.QApplication([])
-    win = QtGui.QMainWindow()
+    win = QtGui.QWidget()
     win.resize(800,800)
-    image_view = pg.ImageView()
-    image_item = None
-    win.setCentralWidget(image_view)
+    density_image_view = pg.ImageView()
+    phase_image_view = pg.ImageView()
+    layout = QtGui.QVBoxLayout(win)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+    layout.addWidget(density_image_view)
+    layout.addWidget(phase_image_view)
     win.show()
-    win.setWindowTitle('pyqtgraph example: ImageView')
+    win.setWindowTitle('MPI task %d'%MPI_rank)
 
     def dark_soliton(x, x_sol, rho, v):
         healing_length = hbar/np.sqrt(2*m*rho*g)
@@ -547,49 +584,47 @@ if __name__ == '__main__':
         return soliton_envelope
 
     def run_sims():
+        initial_filename = 'FEDVR_initial_(rank_%dof%d).pickle'%(MPI_rank, MPI_size)
+        vortices_filename = 'FEDVR_vortices_(rank_%dof%d).pickle'%(MPI_rank, MPI_size)
+
+
         # import lineprofiler
         # lineprofiler.setup()
         import cPickle
-        if True: # not os.path.exists('FEDVR_initial.pickle'):
+        if not os.path.exists(initial_filename):
             psi = initial()
-            with open('FEDVR_initial.pickle', 'w') as f:
+            with open(initial_filename, 'w') as f:
                 cPickle.dump(psi, f)
         else:
-            with open('FEDVR_initial.pickle') as f:
+            with open(initial_filename) as f:
                 psi = cPickle.load(f)
 
         # k = 2*pi*5/(10e-6)
         # # Give the condensate a kick:
         # psi *= np.exp(1j*k*x)
 
-        # print a soliton onto the condensate:
-        # density = (psi.conj()*density_operator*psi).real
-        # x_soliton = 5e-6
-        # rho_bg = density.max()#density[np.abs(x-x_soliton)==np.abs(x-x_soliton).min()]
-        # v_soliton = 0#hbar*k/m
-        # soliton_envelope = dark_soliton(x, x_soliton, rho_bg, v_soliton)
-        # psi *= soliton_envelope
-
-        # if True: #not os.path.exists('FEDVR_vortices.pickle'):
-        #     # Scatter some vortices randomly about:
-        #     for i in range(30):
-        #         x_vortex = np.random.normal(0, scale=R)
-        #         y_vortex = np.random.normal(0, scale=R)
-        #         psi[:] *= np.exp(1j*np.arctan2(y - y_vortex, x - x_vortex))
-
-
-        #     psi = evolution(psi, t_final=400e-6, imaginary_time=True)
-
-        #     with open('FEDVR_vortices.pickle', 'w') as f:
-        #         cPickle.dump(psi, f)
-        # else:
-        #     with open('FEDVR_vortices.pickle') as f:
-        #         psi = cPickle.load(f)
-        # psi = evolution(psi, dt=2e-7, t_final=np.inf)
+        if not os.path.exists(vortices_filename):
+            # Scatter some vortices randomly about.
+            # Ensure all MPI tasks agree on the location of the vortices, by
+            # seeding the pseudorandom number generator with the same seed in
+            # each process:
+            np.random.seed(42)
+            for i in range(30):
+                sign = np.sign(np.random.normal())
+                x_vortex = np.random.normal(0, scale=R)
+                y_vortex = np.random.normal(0, scale=R)
+                psi[:] *= np.exp(sign * 1j*np.arctan2(y - y_vortex, x - x_vortex))
+            psi = evolution(psi, t_final=400e-6, imaginary_time=True)
+            with open(vortices_filename, 'w') as f:
+                cPickle.dump(psi, f)
+        else:
+            with open(vortices_filename) as f:
+                psi = cPickle.load(f)
+        psi = evolution(psi, t_final=np.inf)
 
 
-    run_sims()
-    # inthread(run_sims)
-    # qapplication.exec_()
+    # run_sims()
+    inthread(run_sims)
+    qapplication.exec_()
 
 
