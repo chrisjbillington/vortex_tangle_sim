@@ -1,4 +1,5 @@
 from __future__ import division, print_function
+import sys
 import time
 
 import numpy as np
@@ -219,6 +220,11 @@ class BEC2DSimulator(object):
         """Find the groundstate of the given spatial potential V with chemical
         potential mu. Callback_func, if provided, will be called  every
         callback_period steps"""
+        if not self.MPI_rank: # Only one process prints to stdout:
+            print('\n==========')
+            print('Beginning successive over relaxation')
+            print("Target chemical potential is: " + repr(mu))
+            print('==========')
 
         # We use a real array, as the arithmetic is twice as fast. Groundstate
         # will be real anyway. This precludes attempting to find the
@@ -321,11 +327,15 @@ class BEC2DSimulator(object):
             if not i % print_period:
                 mucalc = self.compute_mu(psi, V)
                 convergence_calc = abs((mucalc - mu)/mu)
-                print(i, 'mu:', mu, 'mucalc:', mucalc,
-                      'convergence:', convergence_calc,
-                      round(1e3*(time.time() - start_time)/(i+1), 2), 'ms per step')
+                message =  ('step: %d'%i +
+                            '  mucalc: ' + repr(mucalc) +
+                            '  convergence: %E'%convergence_calc +
+                            '  time per step: %.02f'%round(1e3*(time.time() - start_time)/(i+1), 2) + ' ms')
+                if not self.MPI_rank: # Only one process prints to stdout:
+                    sys.stdout.write(message + '\n')
                 if convergence_calc < convergence:
-                    print('convergence reached')
+                    if not self.MPI_rank: # Only one process prints to stdout
+                        print('Convergence reached')
                     if callback_func is not None and i % callback_period: # Don't call if already called this step
                         callback_func(i, psi)
                     break
@@ -342,7 +352,14 @@ class BEC2DSimulator(object):
         dx_min = np.diff(self.x[0, 0, :, 0]).min()
         dy_min = np.diff(self.y[0, 0, 0, :]).min()
         dt = min(dx_min, dy_min)**2 * self.m / (2 * pi * hbar)
-        print('using dt = ', dt)
+        if not self.MPI_rank: # Only one process prints to stdout:
+            print('\n==========')
+            if imaginary_time:
+                print("Beginning %s sec of imaginary time evolution"%str(t_final))
+            else:
+                print("Beginning %s sec of time evolution"%str(t_final))
+            print('Using dt = ', dt)
+            print('==========')
 
         n_initial = self.compute_number(psi)
         mu_initial = self.compute_mu(psi, V)
@@ -508,11 +525,13 @@ class BEC2DSimulator(object):
                     self.normalise(psi, n_initial)
                 Ecalc = self.compute_energy(psi, V)
                 ncalc = self.compute_number(psi)
-                print('step:', i,
-                      ' t =', round(t*1e6,1),'us',
-                      ' number_err: %.02e'%abs(ncalc/n_initial-1),
-                      ' energy_err: %.02e'%abs(Ecalc/E_initial-1),
-                      ' time per step:', round(1e3*(time.time() - start_time)/(i+1), 2), 'ms')
+                outmessage = ('step: %d'%i +
+                      '  t = %.01f'%round(t*1e6,1) + ' us' +
+                      '  number_err: %.02e'%abs(ncalc/n_initial-1) +
+                      '  energy_err: %.02e'%abs(Ecalc/E_initial-1) +
+                      '  time per step: %.02f'%round(1e3*(time.time() - start_time)/(i+1), 2) +' ms')
+                if not self.MPI_rank: # Only one process prints to stdout:
+                    sys.stdout.write(outmessage + '\n')
             i += 1
             t += dt
 
