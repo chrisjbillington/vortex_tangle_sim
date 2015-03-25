@@ -3,7 +3,7 @@ import os
 import cPickle as pickle
 
 import numpy as np
-from PyQt4 import QtGui
+from PyQt4 import QtCore, QtGui
 from qtutils import inthread, inmain_decorator
 
 from BEC2D import BEC2DSimulator
@@ -29,8 +29,8 @@ y_min_global = -10e-6
 y_max_global = 10e-6
 
 # Finite elements:
-n_elements_x_global = 32
-n_elements_y_global = 32
+n_elements_x_global = 256
+n_elements_y_global = 256
 
 # Number of DVR basis functions per element:
 Nx = 7
@@ -61,6 +61,9 @@ def initial_guess(x, y):
         return f
 
 SHOW_PLOT = True
+if not os.getenv('DISPLAY'):
+    # But not if there is no x server:
+    SHOW_PLOT = False
 
 if SHOW_PLOT:
     import pyqtgraph as pg
@@ -83,7 +86,8 @@ def run_sims():
     specs = (simulator.MPI_rank, simulator.MPI_size, n_elements_x_global, n_elements_y_global)
     initial_filename = 'cache/FEDVR_initial_(rank_%dof%d_%dx%d).pickle'%specs
     vortices_filename = 'cache/FEDVR_vortices_(rank_%dof%d_%dx%d).pickle'%specs
-
+    if not os.path.exists('cache'):
+        os.mkdir('cache')
     # import lineprofiler
     # lineprofiler.setup(outfile='lineprofile-%d.txt'%MPI_rank)
 
@@ -129,4 +133,13 @@ if not SHOW_PLOT:
 else:
     # If we're plotting stuff, Qt will need the main thread:
     inthread(run_sims)
+
+    import signal
+    # Let the interpreter run every 500ms so it sees Ctrl-C interrupts:
+    timer = QtCore.QTimer()
+    timer.start(500)
+    timer.timeout.connect(lambda: None)  # Let the interpreter run each 500 ms.
+    # Upon seeing a ctrl-c interrupt, quit the event loop
+    signal.signal(signal.SIGINT, lambda *args: qapplication.exit())
+
     qapplication.exec_()
