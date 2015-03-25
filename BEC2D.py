@@ -5,6 +5,7 @@ import time
 import numpy as np
 from scipy.linalg import expm
 from mpi4py import MPI
+import h5py
 
 from FEDVR import FiniteElements2D
 
@@ -13,7 +14,7 @@ pi = np.pi
 
 class BEC2DSimulator(object):
     def __init__(self, m, g, x_min_global, x_max_global, y_min_global, y_max_global, Nx, Ny,
-                 n_elements_x_global, n_elements_y_global):
+                 n_elements_x_global, n_elements_y_global, output_file=None):
         """A class for simulating the Gross-Pitaevskii equation in 2D with the
         finite element discrete variable representation, on multiple cores if
         using MPI"""
@@ -27,6 +28,7 @@ class BEC2DSimulator(object):
         self.y_max_global = y_max_global
         self.n_elements_x_global = n_elements_x_global
         self.n_elements_y_global = n_elements_y_global
+        self.output_file = output_file
         self.Nx = Nx
         self.Ny = Ny
         self.m = m
@@ -57,6 +59,40 @@ class BEC2DSimulator(object):
         self.Kx = -hbar**2 / (2 * self.m) * self.grad2x
         self.Ky = -hbar**2 / (2 * self.m) * self.grad2y
 
+        if self.output_file is not None:
+            with h5py.File(self.output_file, 'w', driver='mpio', comm=MPI.COMM_WORLD) as f:
+                f.attrs['x_min_global'] = x_min_global
+                f.attrs['x_max_global'] = x_max_global
+                f.attrs['y_min_global'] = y_min_global
+                f.attrs['y_max_global'] = y_max_global
+                f.attrs['element_width_x'] = self.element_width_x
+                f.attrs['element_width_y'] = self.element_width_y
+                f.attrs['n_elements_x_global'] = self.n_elements_x_global
+                f.attrs['n_elements_y_global'] = self.n_elements_y_global
+                f.attrs['Nx'] = Nx
+                f.attrs['Ny'] = Ny
+                f.attrs['m'] = m
+                f.attrs['g'] = g
+                f.attrs['global_shape'] = (self.n_elements_x_global, self.n_elements_y_global, Nx, Ny)
+                geometry_dtype = [('x_cart_coord', int),
+                                  ('rank', int),
+                                  ('processor_name', 'a256'),
+                                  ('n_elements_x', int),
+                                  ('global_index_of_first_element', int),
+                                  ('global_index_of_last_element', int)]
+                MPI_geometry_dset = f.create_dataset('MPI_geometry', shape=(self.MPI_size,), dtype=geometry_dtype)
+                MPI_geometry_dset.attrs['MPI_size'] = self.MPI_size
+                data = (self.MPI_x_coord, self.MPI_rank, self.processor_name, self.n_elements_x,
+                        self.global_index_of_first_element, self.global_index_of_last_element)
+                MPI_geometry_dset[self.MPI_x_coord] = data
+                f.create_dataset('x', data=self.x)
+                f.create_dataset('y', data=self.y)
+                f.create_group('output')
+
+            # A dictionary for keeping track of what row we're up to in file
+            # output in each group:
+            self.output_row = {}
+
     def _setup_MPI_grid(self):
         """Split space up according to the number of MPI tasks. Set instance
         attributes for spatial extent and number of elements in this MPI task,
@@ -69,21 +105,24 @@ class BEC2DSimulator(object):
         self.MPI_x_coord, = self.MPI_comm.Get_coords(self.MPI_rank)
         self.MPI_rank_left = self.MPI_comm.Get_cart_rank((self.MPI_x_coord - 1,))
         self.MPI_rank_right = self.MPI_comm.Get_cart_rank((self.MPI_x_coord + 1,))
-
+        self.processor_name = MPI.Get_processor_name()
         # We need an even number of elements in the x direction per process. So let's share them out.
-        elements_per_process, remaining_elements = (2*n for n in divmod(self.n_elements_x_global/2, self.MPI_size))
-        self.n_elements_x = int(elements_per_process)
+        elements_per_process, remaining_elements = (int(2*n) for n in divmod(self.n_elements_x_global/2, self.MPI_size))
+        self.n_elements_x = elements_per_process
         if self.MPI_x_coord < remaining_elements/2:
             # Give the remaining to the lowest ranked processes:
             self.n_elements_x += 2
 
-        # x_min is the sum of the widths of the MPI tasks to our left:
-        self.x_min = self.x_min_global + elements_per_process * self.element_width_x * self.MPI_x_coord
-        # Including the extra elements that the low ranked tasks might have:
+        # Where in the global array of elements are we?
+        self.global_index_of_first_element = elements_per_process * self.MPI_x_coord
+        # Include the extra elements some tasks have:
         if self.MPI_x_coord < remaining_elements/2:
-            self.x_min += 2*self.MPI_x_coord*self.element_width_x
+            self.global_index_of_first_element += 2*self.MPI_x_coord
         else:
-            self.x_min += remaining_elements * self.element_width_x
+            self.global_index_of_first_element += remaining_elements
+        self.global_index_of_last_element = self.global_index_of_first_element + self.n_elements_x - 1
+
+        self.x_min = self.x_min_global + self.element_width_x * self.global_index_of_first_element
         self.x_max = self.x_min + self.element_width_x * self.n_elements_x
 
         # We only split along the x direction for now:
@@ -216,10 +255,10 @@ class BEC2DSimulator(object):
         return Ecalc
 
     def find_groundstate(self, psi_guess, V, mu, convergence=1e-14, relaxation_parameter=1.7,
-                         callback_func=None, callback_period=100, print_period=100):
+                         output_group=None, output_interval=100):
         """Find the groundstate of the given spatial potential V with chemical
-        potential mu. Callback_func, if provided, will be called  every
-        callback_period steps"""
+        potential mu. Data will be saved to a group output_group of the output
+        file every output_interval steps."""
         if not self.MPI_rank: # Only one process prints to stdout:
             print('\n==========')
             print('Beginning successive over relaxation')
@@ -246,8 +285,6 @@ class BEC2DSimulator(object):
         Ky_diags[-1] *= 2
         K_diags = Kx_diags[:, np.newaxis] + Ky_diags[np.newaxis, :]
 
-        i = 0
-
         # Arrays for storing the x and y kinetic energy terms, which are
         # needed by neighboring points at edges:
         Kx_psi = np.einsum('ij,xyjl->xyil', Kx,  psi)
@@ -266,7 +303,37 @@ class BEC2DSimulator(object):
             for k in range(1, self.Ny-1):
                 points_and_indices.append(((j_indices == j) & (k_indices == k), j, k))
 
-        mucalc = self.compute_mu(psi, V)
+        if output_group is not None:
+            with h5py.File(self.output_file, driver='mpio', comm=MPI.COMM_WORLD) as f:
+                group = f['output'].create_group(output_group)
+                group.attrs['start_time'] = time.time()
+                group.create_dataset('V', data=V)
+                group.create_dataset('psi', (0,) + psi.shape, maxshape=(None,) + psi.shape, dtype=psi.dtype)
+                output_log_dtype = [('step_number', int), ('mucalc', int),
+                                    ('convergence', float), ('time_per_step', float)]
+                group.create_dataset('output_log', (0,), maxshape=(None,), dtype=output_log_dtype)
+
+        def do_output():
+            mucalc = self.compute_mu(psi, V)
+            convergence_calc = abs((mucalc - mu)/mu)
+            time_per_step = (time.time() - start_time)/i if i else np.nan
+            message =  ('step: %d'%i +
+                        '  mucalc: ' + repr(mucalc) +
+                        '  convergence: %E'%convergence_calc +
+                        '  time per step: %.02f'%round(1e3*time_per_step, 2) + ' ms')
+            if not self.MPI_rank: # Only one process prints to stdout:
+                sys.stdout.write(message + '\n')
+            if output_group is not None:
+                output_log = (i, mucalc, convergence, time_per_step)
+                self.output(output_group, psi, output_log)
+            return convergence_calc
+
+        i = 0
+        # Output the initial state, which is the zeroth timestep.
+        do_output()
+        i += 1
+
+        # Start simulating:
         start_time = time.time()
         while True:
             # We operate on all elements at once, but only some DVR basis functions at a time.
@@ -322,33 +389,28 @@ class BEC2DSimulator(object):
                 # Update psi at the DVR point(s) with overrelaxation:
                 psi[:, :, points] += relaxation_parameter * (psi_new_GS - psi[:, :, points])
 
-            if callback_func is not None and not i % callback_period:
-                callback_func(i, psi)
-            if not i % print_period:
-                mucalc = self.compute_mu(psi, V)
-                convergence_calc = abs((mucalc - mu)/mu)
-                message =  ('step: %d'%i +
-                            '  mucalc: ' + repr(mucalc) +
-                            '  convergence: %E'%convergence_calc +
-                            '  time per step: %.02f'%round(1e3*(time.time() - start_time)/(i+1), 2) + ' ms')
-                if not self.MPI_rank: # Only one process prints to stdout:
-                    sys.stdout.write(message + '\n')
+            if not i % output_interval:
+                convergence_calc = do_output()
                 if convergence_calc < convergence:
                     if not self.MPI_rank: # Only one process prints to stdout
                         print('Convergence reached')
-                    if callback_func is not None and i % callback_period: # Don't call if already called this step
-                        callback_func(i, psi)
                     break
             i += 1
 
+        # Output the final state if we haven't already this timestep:
+        if i % output_interval:
+            do_output()
+        if output_group is not None:
+            with h5py.File(self.output_file, driver='mpio', comm=MPI.COMM_WORLD) as f:
+                group = f['output'][output_group]
+                group.attrs['completion_time'] = time.time()
+                group.attrs['run_time'] = group.attrs['completion_time'] - group.attrs['start_time']
         # Return complex array ready for time evolution:
         psi = np.array(psi, dtype=complex)
         return psi
 
 
-    def evolve(self, psi, V, t_final, callback_func=None, callback_period=100,
-               print_period=100, imaginary_time=False):
-
+    def evolve(self, psi, V, t_final, imaginary_time=False, output_group=None, output_interval=100):
         dx_min = np.diff(self.x[0, 0, :, 0]).min()
         dy_min = np.diff(self.y[0, 0, 0, :]).min()
         dt = min(dx_min, dy_min)**2 * self.m / (2 * pi * hbar)
@@ -481,8 +543,43 @@ class BEC2DSimulator(object):
         else:
             U_V_halfstep = np.exp(-1j/hbar * (self.g * density + V - mu_initial) * dt/2)
 
+        if output_group is not None:
+            with h5py.File(self.output_file, driver='mpio', comm=MPI.COMM_WORLD) as f:
+                group = f['output'].create_group(output_group)
+                group.attrs['start_time'] = time.time()
+                group.attrs['dt'] = dt
+                group.attrs['t_final'] = t_final
+                group.attrs['imaginary_time'] = imaginary_time
+                group.create_dataset('V', data=V)
+                group.create_dataset('psi', (0,) + psi.shape, maxshape=(None,) + psi.shape, dtype=psi.dtype)
+                output_log_dtype = [('step_number', int), ('time', float),
+                                    ('number_err', float), ('energy_err', float), ('time_per_step', float)]
+                group.create_dataset('output_log', (0,), maxshape=(None,), dtype=output_log_dtype)
+
+        def do_output():
+            if imaginary_time:
+                self.normalise(psi, n_initial)
+            energy_err = self.compute_energy(psi, V) / E_initial - 1
+            number_err = self.compute_number(psi) / n_initial - 1
+            time_per_step = (time.time() - start_time) / i if i else np.nan
+            outmessage = ('step: %d' % i +
+                  '  t = %.01f' % round(t * 1e6,1) + ' us' +
+                  '  number_err: %+.02E' % number_err +
+                  '  energy_err: %+.02E' % energy_err +
+                  '  time per step: %.02f' % round(1e3*time_per_step, 2) +' ms')
+            if not self.MPI_rank: # Only one process prints to stdout:
+                sys.stdout.write(outmessage + '\n')
+            output_log = (i, t, number_err, energy_err, time_per_step)
+            self.output(output_group, psi, output_log)
+
         i = 0
         t = 0
+
+        # Output the initial state, which is the zeroth timestep.
+        do_output()
+        i += 1
+
+        # Start simulating:
         start_time = time.time()
         while t < t_final:
             # Evolve for half a step with potential evolution operator:
@@ -516,32 +613,33 @@ class BEC2DSimulator(object):
             # Evolve for half a timestep with potential evolution operator:
             psi[:] = U_V_halfstep*psi
 
-            if callback_func is not None and not i % callback_period:
-                if imaginary_time:
-                    self.normalise(psi, n_initial)
-                callback_func(i, t, psi)
-            if not i % print_period:
-                if imaginary_time and i % callback_period: # Don't renormalise if already done this step:
-                    self.normalise(psi, n_initial)
-                Ecalc = self.compute_energy(psi, V)
-                ncalc = self.compute_number(psi)
-                outmessage = ('step: %d'%i +
-                      '  t = %.01f'%round(t*1e6,1) + ' us' +
-                      '  number_err: %.02e'%abs(ncalc/n_initial-1) +
-                      '  energy_err: %.02e'%abs(Ecalc/E_initial-1) +
-                      '  time per step: %.02f'%round(1e3*(time.time() - start_time)/(i+1), 2) +' ms')
-                if not self.MPI_rank: # Only one process prints to stdout:
-                    sys.stdout.write(outmessage + '\n')
+            if not i % output_interval:
+                do_output()
             i += 1
             t += dt
 
         # t_final reached:
-        if imaginary_time:
-            self.normalise(psi, n_initial)
-        if callback_func is not None and i % callback_period: # Don't call if already called on the last step:
-            callback_func(i, t, psi)
+        if imaginary_time and (i - 1) % output_interval:
+            do_output()
+        if output_group is not None:
+            with h5py.File(self.output_file, driver='mpio', comm=MPI.COMM_WORLD) as f:
+                group = f['output'][output_group]
+                group.attrs['completion_time'] = time.time()
+                group.attrs['run_time'] = group.attrs['completion_time'] - group.attrs['start_time']
         return psi
 
-
-
-
+    def output(self, output_group, psi, output_log):
+        if self.output_file is None or output_group is None:
+            return
+        output_row = self.output_row.setdefault(output_group, 0)
+        with h5py.File(self.output_file, driver='mpio', comm=MPI.COMM_WORLD) as f:
+            group = f['output'][output_group]
+            psi_dataset = group['psi']
+            output_log_dataset = group['output_log']
+            start = self.global_index_of_first_element
+            end = self.global_index_of_last_element + 1
+            psi_dataset.resize((output_row + 1,) + psi.shape)
+            psi_dataset[output_row, start:end, :, :, :] = psi
+            output_log_dataset.resize((output_row + 1,))
+            output_log_dataset[output_row] = output_log
+            self.output_row[output_group] += 1

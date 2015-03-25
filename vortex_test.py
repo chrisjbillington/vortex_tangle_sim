@@ -3,8 +3,6 @@ import os
 import cPickle as pickle
 
 import numpy as np
-from PyQt4 import QtCore, QtGui
-from qtutils import inthread, inmain_decorator
 
 from BEC2D import BEC2DSimulator
 
@@ -29,30 +27,39 @@ y_min_global = -10e-6
 y_max_global = 10e-6
 
 # Finite elements:
-n_elements_x_global = 256
-n_elements_y_global = 256
+n_elements_x_global = 32
+n_elements_y_global = 32
 
 # Number of DVR basis functions per element:
 Nx = 7
 Ny = 7
 
 simulator = BEC2DSimulator(m, g, x_min_global, x_max_global, y_min_global, y_max_global, Nx, Ny,
-                           n_elements_x_global, n_elements_y_global)
+                           n_elements_x_global, n_elements_y_global, output_file = 'vortex_test.h5')
 x = simulator.x
 y = simulator.y
 
 # The Harmonic trap at our gridpoints, (n_elements x N):
 V = 0.5*m*omega**2*(x**2 + y**2)
 
-@inmain_decorator()
+import matplotlib
+
+plot_number = 0
+
 def plot(*args):
+    global plot_number
     psi = args[-1]
-    if SHOW_PLOT:
-        x_plot, y_plot, psi_interp = simulator.elements.interpolate_vector(psi, Nx, Ny)
-        rho_plot = np.abs(psi_interp)**2
-        phase_plot = np.angle(psi_interp)
-        density_image_view.setImage(rho_plot)
-        phase_image_view.setImage(phase_plot)
+    x_plot, y_plot, psi_interp = simulator.elements.interpolate_vector(psi, Nx, Ny)
+    rho = np.abs(psi_interp)**2
+    phase = np.angle(psi_interp)
+
+    hsl = np.zeros(psi_interp.shape + (3,))
+    hsl[:, :, 2] = rho/rho.max()
+    hsl[:, :, 0] = np.array((phase + pi)/(2*pi))
+    hsl[:, :, 1] = 0.33333
+    rgb = matplotlib.colors.hsv_to_rgb(hsl)
+    matplotlib.image.imsave('plots/plot%04d.png' % plot_number, rgb)
+    plot_number += 1
 
 def initial_guess(x, y):
         sigma_x = 0.5*R
@@ -60,86 +67,27 @@ def initial_guess(x, y):
         f = np.sqrt(np.exp(-x**2/(2*sigma_x**2) - y**2/(2*sigma_y**2)))
         return f
 
-SHOW_PLOT = True
-if not os.getenv('DISPLAY'):
-    # But not if there is no x server:
-    SHOW_PLOT = False
-
-if SHOW_PLOT:
-    import pyqtgraph as pg
-
-    qapplication = QtGui.QApplication([])
-    win = QtGui.QWidget()
-    win.resize(800,800)
-    density_image_view = pg.ImageView()
-    phase_image_view = pg.ImageView()
-    layout = QtGui.QVBoxLayout(win)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(0)
-    layout.addWidget(density_image_view)
-    layout.addWidget(phase_image_view)
-    win.show()
-    win.setWindowTitle('MPI task %d'%simulator.MPI_rank)
-
-
 def run_sims():
-    specs = (simulator.MPI_rank, simulator.MPI_size, n_elements_x_global, n_elements_y_global)
-    initial_filename = 'cache/FEDVR_initial_(rank_%dof%d_%dx%d).pickle'%specs
-    vortices_filename = 'cache/FEDVR_vortices_(rank_%dof%d_%dx%d).pickle'%specs
-    if not os.path.exists('cache'):
-        os.mkdir('cache')
     # import lineprofiler
     # lineprofiler.setup(outfile='lineprofile-%d.txt'%MPI_rank)
 
-    # Find groundstate, or open it if file already exists:
-    if not os.path.exists(initial_filename):
-        psi = simulator.elements.make_vector(initial_guess)
-        simulator.normalise(psi, N_2D)
-        psi = simulator.find_groundstate(psi, V, mu,
-                                         callback_func=plot, callback_period=100)
-        with open(initial_filename, 'w') as f:
-            pickle.dump(psi, f)
-    else:
-        with open(initial_filename) as f:
-            psi = pickle.load(f)
+    psi = simulator.elements.make_vector(initial_guess)
+    simulator.normalise(psi, N_2D)
+    psi = simulator.find_groundstate(psi, V, mu, output_group='initial')
 
-    # Create a state with random vortices, or open it if file already exists:
-    if not os.path.exists(vortices_filename):
-        # Scatter some vortices randomly about.
-        # Ensure all MPI tasks agree on the location of the vortices, by
-        # seeding the pseudorandom number generator with the same seed in
-        # each process:
-        np.random.seed(42)
-        for i in range(30):
-            sign = np.sign(np.random.normal())
-            x_vortex = np.random.normal(0, scale=R)
-            y_vortex = np.random.normal(0, scale=R)
-            psi[:] *= np.exp(sign * 1j*np.arctan2(simulator.y - y_vortex, simulator.x - x_vortex))
-        psi = simulator.evolve(psi, V, t_final=400e-6,
-                               callback_func=plot, callback_period=100,
-                               imaginary_time=True)
-        with open(vortices_filename, 'w') as f:
-            pickle.dump(psi, f)
-    else:
-        with open(vortices_filename) as f:
-            psi = pickle.load(f)
+    # Scatter some vortices randomly about.
+    # Ensure all MPI tasks agree on the location of the vortices, by
+    # seeding the pseudorandom number generator with the same seed in
+    # each process:
+    np.random.seed(42)
+    for i in range(30):
+        sign = np.sign(np.random.normal())
+        x_vortex = np.random.normal(0, scale=R)
+        y_vortex = np.random.normal(0, scale=R)
+        psi[:] *= np.exp(sign * 1j*np.arctan2(simulator.y - y_vortex, simulator.x - x_vortex))
+    psi = simulator.evolve(psi, V, t_final=400e-6, output_group='vortices', imaginary_time=True)
 
-    # Evolve in time forever:
-    psi = simulator.evolve(psi, V, t_final=np.inf,
-                           callback_func=plot, callback_period=100)
+    # Evolve in time:
+    psi = simulator.evolve(psi, V, t_final=10e-3, output_group='evolution')
 
-if not SHOW_PLOT:
-    run_sims()
-else:
-    # If we're plotting stuff, Qt will need the main thread:
-    inthread(run_sims)
-
-    import signal
-    # Let the interpreter run every 500ms so it sees Ctrl-C interrupts:
-    timer = QtCore.QTimer()
-    timer.start(500)
-    timer.timeout.connect(lambda: None)  # Let the interpreter run each 500 ms.
-    # Upon seeing a ctrl-c interrupt, quit the event loop
-    signal.signal(signal.SIGINT, lambda *args: qapplication.exit())
-
-    qapplication.exec_()
+run_sims()

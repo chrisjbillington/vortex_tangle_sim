@@ -1,7 +1,6 @@
 from __future__ import division, print_function
 from numpy.polynomial.polynomial import Polynomial
 import numpy as np
-import pylab as pl
 
 def gauss_lobatto_points_and_weights(N, left_edge, right_edge):
     """Returns the spatial points and weights for the N-point Gauss-Lobatto
@@ -409,53 +408,3 @@ class FiniteElements2D(object):
         y = self.points_y.flatten()
         values = values.transpose(0,2,1,3).reshape(output_shape)
         return x, y, values
-
-
-if __name__ == '__main__':
-
-    from PyQt4 import QtGui
-    import pyqtgraph.opengl as gl
-
-    qapplication = QtGui.QApplication([])
-
-    w = gl.GLViewWidget()
-    w.show()
-    w.setWindowTitle('pyqtgraph example: GLSurfacePlot')
-    w.setCameraPosition(distance=50)
-
-    # Add a grid to the view
-    g = gl.GLGridItem()
-    g.scale(2,2,1)
-    g.setDepthValue(10)  # draw grid after surfaces since they may be translucent
-    w.addItem(g)
-
-    # Space:
-    x_min = -15e-6
-    x_max = 15e-6
-    y_min = -15e-6
-    y_max = 15e-6
-
-    # Finite elements:
-    Nx = 7
-    Ny = 7
-    n_elements_x = 10
-    n_elements_y = 10
-
-    elements = FiniteElements2D(Nx, Ny, n_elements_x, n_elements_y, x_min, x_max, y_min, y_max)
-
-    def f(x, y):
-        sigma_x = 3e-6
-        sigma_y = 3e-6
-        return np.exp(-x**2/(2*sigma_x**2) - y**2/(2*sigma_y**2))
-
-    psi = elements.make_vector(f)
-    # x, y, psi_interp = elements.get_values(psi)
-    x, y, psi_interp = elements.interpolate_vector(psi, Nx, Ny)
-    psi_exact = f(x[:, np.newaxis], y[np.newaxis, :])
-
-
-    p2 = gl.GLSurfacePlotItem(x=x*1e6, y=y*1e6, z=psi_interp.real*10, shader='normalColor')
-    w.addItem(p2)
-
-    qapplication.exec_()
-
