@@ -514,24 +514,42 @@ class BEC2DSimulator(object):
             psi[:, odd_elements_y, :, 0] = psi[:, even_elements_y, :, -1]
             psi[:, -1, :, -1] = psi[:, 0, :, 0] # periodic boundary conditions
 
+        # Now we construct some unitary time evolution operators. We are using
+        # the fourth order 'real space product' split operator method, which
+        # can be constructed as a series of second order evolution operators.
+        # See equation 18 of 'The discrete variable method for the solution of
+        # the time-dependent Schrodinger equation"  by Barry I. Schneider, Lee
+        # A. Collins, Journal of Non-Crystalline Solids 351 (2005). Basically
+        # we need to construct unitary evolution operators for half and full
+        # multiples of both p * dt and q * dt:
+        p = 1/(4 - 4**(1/3))
+        q = 1 - 4*p
         if imaginary_time:
             # The kinetic energy unitary evolution oparators for half a timestep
             # in imaginary time, shapes (Nx, Nx) and (Ny, Ny). Not diagonal, but
             # the same in each element.
-            U_Kx_halfstep = expm(-1/hbar * self.Kx * dt/2)
-            U_Ky_halfstep = expm(-1/hbar * self.Ky * dt/2)
+            U_Kx_halfstep_p = expm(-1/hbar * self.Kx * p * dt/2)
+            U_Ky_halfstep_p = expm(-1/hbar * self.Ky * p * dt/2)
+            U_Kx_halfstep_q = expm(-1/hbar * self.Kx * q * dt/2)
+            U_Ky_halfstep_q = expm(-1/hbar * self.Ky * q * dt/2)
             # The same as above but for a full timestep:
-            U_Kx_fullstep = expm(-1/hbar * self.Kx * dt)
-            U_Ky_fullstep = expm(-1/hbar * self.Ky * dt)
+            U_Kx_fullstep_p = expm(-1/hbar * self.Kx * p * dt)
+            U_Ky_fullstep_p = expm(-1/hbar * self.Ky * p * dt)
+            U_Kx_fullstep_q = expm(-1/hbar * self.Kx * q * dt)
+            U_Ky_fullstep_q = expm(-1/hbar * self.Ky * q * dt)
         else:
             # The kinetic energy unitary evolution oparators for half a timestep,
             # shapes (Nx, Nx) and (Ny, Ny). Not diagonal, but the same in each
             # element.
-            U_Kx_halfstep = expm(-1j/hbar * self.Kx * dt/2)
-            U_Ky_halfstep = expm(-1j/hbar * self.Ky * dt/2)
+            U_Kx_halfstep_p = expm(-1j/hbar * self.Kx * p * dt/2)
+            U_Ky_halfstep_p = expm(-1j/hbar * self.Ky * p * dt/2)
+            U_Kx_halfstep_q = expm(-1j/hbar * self.Kx * q * dt/2)
+            U_Ky_halfstep_q = expm(-1j/hbar * self.Ky * q * dt/2)
             # The same as above but for a full timestep:
-            U_Kx_fullstep = expm(-1j/hbar * self.Kx * dt)
-            U_Ky_fullstep = expm(-1j/hbar * self.Ky * dt)
+            U_Kx_fullstep_p = expm(-1j/hbar * self.Kx * p * dt)
+            U_Ky_fullstep_p = expm(-1j/hbar * self.Ky * p * dt)
+            U_Kx_fullstep_q = expm(-1j/hbar * self.Kx * q * dt)
+            U_Ky_fullstep_q = expm(-1j/hbar * self.Ky * q * dt)
 
         # The potential energy evolution operator for the first half timestep. It
         # is always the same as at the end of timesteps, so we usually just re-use
@@ -539,9 +557,19 @@ class BEC2DSimulator(object):
         # too.
         density = (psi.conj()*self.density_operator*psi).real
         if imaginary_time:
-            U_V_halfstep = np.exp(-1/hbar * (self.g * density + V - mu_initial) * dt/2)
+            U_V_halfstep_p = np.exp(-1/hbar * (self.g * density + V - mu_initial) * p * dt/2)
+            U_V_halfstep_q = np.exp(-1/hbar * (self.g * density + V - mu_initial) * q * dt/2)
         else:
-            U_V_halfstep = np.exp(-1j/hbar * (self.g * density + V - mu_initial) * dt/2)
+            U_V_halfstep_p = np.exp(-1j/hbar * (self.g * density + V - mu_initial) * p * dt/2)
+            U_V_halfstep_q = np.exp(-1j/hbar * (self.g * density + V - mu_initial) * q * dt/2)
+
+        # We implement the fourth order method by repeated application of the
+        # second order method with differently sized 'sub-timesteps'. Here we
+        # make a list of the five sub-timestep sizes and sets of operators
+        # used in each sub-step.
+        p_substep = (p*dt, U_V_halfstep_p, U_Kx_halfstep_p, U_Ky_halfstep_p, U_Kx_fullstep_p, U_Ky_fullstep_p)
+        q_substep = (q*dt, U_V_halfstep_q, U_Kx_halfstep_q, U_Ky_halfstep_q, U_Kx_fullstep_q, U_Ky_fullstep_q)
+        substeps = [p_substep, p_substep, q_substep, p_substep, p_substep]
 
         if output_group is not None:
             with h5py.File(self.output_file, driver='mpio', comm=MPI.COMM_WORLD) as f:
@@ -582,41 +610,57 @@ class BEC2DSimulator(object):
         # Start simulating:
         start_time = time.time()
         while t < t_final:
-            # Evolve for half a step with potential evolution operator:
-            psi[:] = U_V_halfstep*psi
+            for substep_number, substep in enumerate(substeps):
+                (sub_dt, U_V_half_substep, U_Kx_half_substep,
+                 U_Ky_half_substep,U_Kx_full_substep, U_Ky_full_substep) = substep
 
-            # Evolution with x kinetic energy evolution operator, using odd-even-odd split step method:
-            psi[odd_elements_x, :, :, :] = np.einsum('ij,xyjl->xyil', U_Kx_halfstep, psi[odd_elements_x, :, :, :])
-            copy_x_edges_odd_to_even(psi)
-            psi[even_elements_x, :, :, :] = np.einsum('ij,xyjl->xyil', U_Kx_fullstep, psi[even_elements_x, :, :, :])
-            copy_x_edges_even_to_odd(psi)
-            psi[odd_elements_x, :, :, :] = np.einsum('ij,xyjl->xyil', U_Kx_halfstep, psi[odd_elements_x, :, :, :])
-            copy_x_edges_odd_to_even(psi)
+                if substep_number in [2, 3]:
+                    # If it's the q substep, or the p substep after the q
+                    # substep, then we need to update our potential energy
+                    # evolution operator to reflect the current density.
+                    # Otherwise, it is the same as at the end of the last sub-
+                    # step, and we can just re-use it:
+                    if imaginary_time:
+                        U_V_half_substep[:] = np.exp(-1/hbar * (self.g * density + V - mu_initial) * sub_dt / 2)
+                    else:
+                        U_V_half_substep[:] = np.exp(-1j/hbar * (self.g * density + V - mu_initial) * sub_dt / 2)
 
-            # Evolution with y kinetic energy evolution operator, using odd-even-odd split step method:
-            psi[:, odd_elements_y, :, :] = np.einsum('kl,xyjl->xyjk', U_Ky_halfstep, psi[:, odd_elements_y, :, :])
-            copy_y_edges_odd_to_even(psi)
-            psi[:, even_elements_y, :, :] = np.einsum('kl,xyjl->xyjk', U_Ky_fullstep, psi[:, even_elements_y, :, :])
-            copy_y_edges_even_to_odd(psi)
-            psi[:, odd_elements_y, :, :] = np.einsum('kl,xyjl->xyjk', U_Ky_halfstep, psi[:, odd_elements_y, :, :])
-            copy_y_edges_odd_to_even(psi)
+                # Evolve for half a substep with potential evolution operator:
+                psi[:] = U_V_half_substep*psi
 
-            # Calculate potential energy evolution operator for half a step
-            if imaginary_time:
-                self.normalise(psi, n_initial)
-            density[:] = (psi.conj()*self.density_operator*psi).real
-            if imaginary_time:
-                U_V_halfstep[:] = np.exp(-1/hbar * (self.g * density + V - mu_initial) * dt/2)
-            else:
-                U_V_halfstep[:] = np.exp(-1j/hbar * (self.g * density + V - mu_initial) * dt/2)
+                # Evolution with x kinetic energy evolution operator, using odd-even-odd split step method:
+                psi[odd_elements_x] = np.einsum('ij,xyjl->xyil', U_Kx_half_substep, psi[odd_elements_x, :, :, :])
+                copy_x_edges_odd_to_even(psi)
+                psi[even_elements_x] = np.einsum('ij,xyjl->xyil', U_Kx_full_substep, psi[even_elements_x, :, :, :])
+                copy_x_edges_even_to_odd(psi)
+                psi[odd_elements_x] = np.einsum('ij,xyjl->xyil', U_Kx_half_substep, psi[odd_elements_x, :, :, :])
+                copy_x_edges_odd_to_even(psi)
 
-            # Evolve for half a timestep with potential evolution operator:
-            psi[:] = U_V_halfstep*psi
+                # Evolution with y kinetic energy evolution operator, using odd-even-odd split step method:
+                psi[:, odd_elements_y] = np.einsum('kl,xyjl->xyjk', U_Ky_half_substep, psi[:, odd_elements_y, :, :])
+                copy_y_edges_odd_to_even(psi)
+                psi[:, even_elements_y] = np.einsum('kl,xyjl->xyjk', U_Ky_full_substep, psi[:, even_elements_y, :, :])
+                copy_y_edges_even_to_odd(psi)
+                psi[:, odd_elements_y] = np.einsum('kl,xyjl->xyjk', U_Ky_half_substep, psi[:, odd_elements_y, :, :])
+                copy_y_edges_odd_to_even(psi)
 
+                # Calculate potential energy evolution operator for half a step
+                if imaginary_time:
+                    self.normalise(psi, n_initial)
+                density[:] = (psi.conj()*self.density_operator*psi).real
+                if imaginary_time:
+                    U_V_half_substep[:] = np.exp(-1/hbar * (self.g * density + V - mu_initial) * sub_dt / 2)
+                else:
+                    U_V_half_substep[:] = np.exp(-1j/hbar * (self.g * density + V - mu_initial) * sub_dt / 2)
+
+                # Evolve for half a timestep with potential evolution operator:
+                psi[:] = U_V_half_substep*psi
+
+                t += sub_dt
             if not i % output_interval:
                 do_output()
             i += 1
-            t += dt
+
 
         # t_final reached:
         if imaginary_time and (i - 1) % output_interval:
