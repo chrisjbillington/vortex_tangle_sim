@@ -71,23 +71,32 @@ def run_sims():
     # import lineprofiler
     # lineprofiler.setup(outfile='lineprofile-%d.txt'%MPI_rank)
 
-    psi = simulator.elements.make_vector(initial_guess)
-    simulator.normalise(psi, N_2D)
-    psi = simulator.find_groundstate(psi, V, mu, output_group='initial')
+    if os.path.exists('psi.pickle'):
+        with open('psi.pickle') as f:
+            psi = pickle.load(f)
+    else:
+        psi = simulator.elements.make_vector(initial_guess)
+        simulator.normalise(psi, N_2D)
+        psi = simulator.find_groundstate(psi, V, mu, output_group='initial')
 
-    # Scatter some vortices randomly about.
-    # Ensure all MPI tasks agree on the location of the vortices, by
-    # seeding the pseudorandom number generator with the same seed in
-    # each process:
-    np.random.seed(42)
-    for i in range(30):
-        sign = np.sign(np.random.normal())
-        x_vortex = np.random.normal(0, scale=R)
-        y_vortex = np.random.normal(0, scale=R)
-        psi[:] *= np.exp(sign * 1j*np.arctan2(simulator.y - y_vortex, simulator.x - x_vortex))
-    psi = simulator.evolve(psi, V, t_final=400e-6, output_group='vortices', imaginary_time=True)
-
+        # Scatter some vortices randomly about.
+        # Ensure all MPI tasks agree on the location of the vortices, by
+        # seeding the pseudorandom number generator with the same seed in
+        # each process:
+        np.random.seed(42)
+        for i in range(30):
+            sign = np.sign(np.random.normal())
+            x_vortex = np.random.normal(0, scale=R)
+            y_vortex = np.random.normal(0, scale=R)
+            psi[:] *= np.exp(sign * 1j*np.arctan2(simulator.y - y_vortex, simulator.x - x_vortex))
+        psi = simulator.evolve(psi, V, t_final=400e-6, output_group='vortices', imaginary_time=True)
+        with open('psi.pickle', 'w') as f:
+            pickle.dump(psi, f)
     # Evolve in time:
-    psi = simulator.evolve(psi, V, t_final=10e-3, output_group='evolution')
+    import time
+    start_time = time.time()
+    psi = simulator.evolve(psi, V, t_final=400e-6, output_group='evolution')
+    print('time taken:', time.time() - start_time)
 
 run_sims()
+
