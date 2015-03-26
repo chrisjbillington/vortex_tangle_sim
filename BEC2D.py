@@ -1,6 +1,7 @@
 from __future__ import division, print_function
 import sys
 import time
+import traceback
 
 import numpy as np
 from scipy.linalg import expm
@@ -255,7 +256,7 @@ class BEC2DSimulator(object):
         return Ecalc
 
     def find_groundstate(self, psi_guess, V, mu, convergence=1e-14, relaxation_parameter=1.7,
-                         output_group=None, output_interval=100):
+                         output_group=None, output_interval=100, output_callback=None):
         """Find the groundstate of the given spatial potential V with chemical
         potential mu. Data will be saved to a group output_group of the output
         file every output_interval steps."""
@@ -323,9 +324,14 @@ class BEC2DSimulator(object):
                         '  time per step: %.02f'%round(1e3*time_per_step, 2) + ' ms')
             if not self.MPI_rank: # Only one process prints to stdout:
                 sys.stdout.write(message + '\n')
+            output_log = (i, mucalc, convergence, time_per_step)
             if output_group is not None:
-                output_log = (i, mucalc, convergence, time_per_step)
                 self.output(output_group, psi, output_log)
+            if output_callback is not None:
+                try:
+                    output_callback(psi, output_log)
+                except Exception:
+                    traceback.print_exc()
             return convergence_calc
 
         i = 0
@@ -410,10 +416,11 @@ class BEC2DSimulator(object):
         return psi
 
 
-    def evolve(self, psi, V, t_final, imaginary_time=False, output_group=None, output_interval=100):
+    def evolve(self, psi, V, t_final, imaginary_time=False, timestep_factor=1,
+               output_group=None, output_interval=100, output_callback=None):
         dx_min = np.diff(self.x[0, 0, :, 0]).min()
         dy_min = np.diff(self.y[0, 0, 0, :]).min()
-        dt = min(dx_min, dy_min)**2 * self.m / (2 * pi * hbar)
+        dt = timestep_factor * min(dx_min, dy_min)**2 * self.m / hbar
         if not self.MPI_rank: # Only one process prints to stdout:
             print('\n==========')
             if imaginary_time:
@@ -515,15 +522,15 @@ class BEC2DSimulator(object):
             psi[:, -1, :, -1] = psi[:, 0, :, 0] # periodic boundary conditions
 
         # Now we construct some unitary time evolution operators. We are using
-        # the fourth order 'real space product' split operator method, which
+        # the fourth order "real space product" split operator method, which
         # can be constructed as a series of second order evolution operators.
-        # See equation 18 of 'The discrete variable method for the solution of
+        # See equation 18 of "The discrete variable method for the solution of
         # the time-dependent Schrodinger equation"  by Barry I. Schneider, Lee
         # A. Collins, Journal of Non-Crystalline Solids 351 (2005). Basically
         # we need to construct unitary evolution operators for half and full
         # multiples of both p * dt and q * dt:
-        p = 1/(4 - 4**(1/3))
-        q = 1 - 4*p
+        p = 1. / (4 - 4 ** (1. / 3))
+        q = 1 - 4 * p
         if imaginary_time:
             # The kinetic energy unitary evolution oparators for half a timestep
             # in imaginary time, shapes (Nx, Nx) and (Ny, Ny). Not diagonal, but
@@ -551,10 +558,11 @@ class BEC2DSimulator(object):
             U_Kx_fullstep_q = expm(-1j/hbar * self.Kx * q * dt)
             U_Ky_fullstep_q = expm(-1j/hbar * self.Ky * q * dt)
 
-        # The potential energy evolution operator for the first half timestep. It
-        # is always the same as at the end of timesteps, so we usually just re-use
-        # at the start of each loop. But this being the first loop we need it now
-        # too.
+        # The potential energy evolution operator for the first half timestep.
+        # It is always the same as at the end of timesteps, so we usually just
+        # re-use at the start of each loop. But this being the first loop we
+        # need it now too. We don't actually need the q ones to have the right
+        # values right now, but the arrays need to be defined still.
         density = (psi.conj()*self.density_operator*psi).real
         if imaginary_time:
             U_V_halfstep_p = np.exp(-1/hbar * (self.g * density + V - mu_initial) * p * dt/2)
@@ -566,7 +574,7 @@ class BEC2DSimulator(object):
         # We implement the fourth order method by repeated application of the
         # second order method with differently sized 'sub-timesteps'. Here we
         # make a list of the five sub-timestep sizes and sets of operators
-        # used in each sub-step.
+        # used in each sub-step (four of the five substeps are the same):
         p_substep = (p*dt, U_V_halfstep_p, U_Kx_halfstep_p, U_Ky_halfstep_p, U_Kx_fullstep_p, U_Ky_fullstep_p)
         q_substep = (q*dt, U_V_halfstep_q, U_Kx_halfstep_q, U_Ky_halfstep_q, U_Kx_fullstep_q, U_Ky_fullstep_q)
         substeps = [p_substep, p_substep, q_substep, p_substep, p_substep]
@@ -598,7 +606,13 @@ class BEC2DSimulator(object):
             if not self.MPI_rank: # Only one process prints to stdout:
                 sys.stdout.write(outmessage + '\n')
             output_log = (i, t, number_err, energy_err, time_per_step)
-            self.output(output_group, psi, output_log)
+            if output_group is not None:
+                self.output(output_group, psi, output_log)
+            if output_callback is not None:
+                try:
+                    output_callback(psi, output_log)
+                except Exception:
+                    traceback.print_exc()
 
         i = 0
         t = 0
@@ -661,9 +675,8 @@ class BEC2DSimulator(object):
                 do_output()
             i += 1
 
-
         # t_final reached:
-        if imaginary_time and (i - 1) % output_interval:
+        if (i - 1) % output_interval:
             do_output()
         if output_group is not None:
             with h5py.File(self.output_file, driver='mpio', comm=MPI.COMM_WORLD) as f:
@@ -673,8 +686,6 @@ class BEC2DSimulator(object):
         return psi
 
     def output(self, output_group, psi, output_log):
-        if self.output_file is None or output_group is None:
-            return
         output_row = self.output_row.setdefault(output_group, 0)
         with h5py.File(self.output_file, driver='mpio', comm=MPI.COMM_WORLD) as f:
             group = f['output'][output_group]

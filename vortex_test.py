@@ -95,7 +95,7 @@ def run_sims():
     # Evolve in time:
     import time
     start_time = time.time()
-    psi = simulator.evolve(psi, V, t_final=400e-6, output_group='evolution')
+    psi = simulator.evolve(psi, V, t_final=1e-3, output_group=None)
     print('time taken:', time.time() - start_time)
 
 run_sims()
