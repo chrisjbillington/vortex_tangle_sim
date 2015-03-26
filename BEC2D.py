@@ -13,6 +13,31 @@ from FEDVR import FiniteElements2D
 hbar = 1.054571726e-34
 pi = np.pi
 
+
+def get_factors(n):
+    """return all the factors of n"""
+    factors = set()
+    for i in range(1, int(n**(0.5)) + 1):
+        if not n % i:
+            factors.update((i, n // i))
+    return factors
+
+
+def get_best_2D_segmentation(size_x, size_y, N_segments):
+    """Returns (best_n_segments_x, best_n_segments_y), describing the optimal
+    cartesian grid for splitting up a rectangle of size (size_x, size_y) into
+    N_segments equal sized segments such as to minimise surface area between
+    the segments."""
+    lowest_surface_area = None
+    for n_segments_x in get_factors(N_segments):
+        n_segments_y = N_segments // n_segments_x
+        surface_area = n_segments_x * size_y + n_segments_y * size_x
+        if lowest_surface_area is None or surface_area < lowest_surface_area:
+            lowest_surface_area = surface_area
+            best_n_segments_x, best_n_segments_y = n_segments_x, n_segments_y
+    return best_n_segments_x, best_n_segments_y
+
+
 class BEC2DSimulator(object):
     def __init__(self, m, g, x_min_global, x_max_global, y_min_global, y_max_global, Nx, Ny,
                  n_elements_x_global, n_elements_y_global, output_file=None):
@@ -75,17 +100,19 @@ class BEC2DSimulator(object):
                 f.attrs['m'] = m
                 f.attrs['g'] = g
                 f.attrs['global_shape'] = (self.n_elements_x_global, self.n_elements_y_global, Nx, Ny)
-                geometry_dtype = [('x_cart_coord', int),
-                                  ('rank', int),
+                geometry_dtype = [('rank', int),
                                   ('processor_name', 'a256'),
+                                  ('x_cart_coord', int),
+                                  ('y_cart_coord', int),
+                                  ('first_element_x', int),
+                                  ('first_element_y', int),
                                   ('n_elements_x', int),
-                                  ('global_index_of_first_element', int),
-                                  ('global_index_of_last_element', int)]
+                                  ('n_elements_y', int)]
                 MPI_geometry_dset = f.create_dataset('MPI_geometry', shape=(self.MPI_size,), dtype=geometry_dtype)
                 MPI_geometry_dset.attrs['MPI_size'] = self.MPI_size
-                data = (self.MPI_x_coord, self.MPI_rank, self.processor_name, self.n_elements_x,
-                        self.global_index_of_first_element, self.global_index_of_last_element)
-                MPI_geometry_dset[self.MPI_x_coord] = data
+                data = (self.MPI_rank, self.processor_name,self.MPI_x_coord, self.MPI_y_coord,
+                        self.global_first_x_element, self.global_first_y_element, self.n_elements_x, self.n_elements_y)
+                MPI_geometry_dset[self.MPI_rank] = data
                 f.create_dataset('x', data=self.x)
                 f.create_dataset('y', data=self.y)
                 f.create_group('output')
@@ -101,48 +128,75 @@ class BEC2DSimulator(object):
         data to adjacent processes"""
 
         self.MPI_size = MPI.COMM_WORLD.Get_size()
-        self.MPI_comm = MPI.COMM_WORLD.Create_cart([self.MPI_size], periods=[True], reorder=True)
+        self.MPI_size_x, self.MPI_size_y = get_best_2D_segmentation(
+                                               self.n_elements_x_global, self.n_elements_y_global, self.MPI_size)
+        self.MPI_comm = MPI.COMM_WORLD.Create_cart([self.MPI_size_x, self.MPI_size_y], periods=[True, True], reorder=True)
         self.MPI_rank = self.MPI_comm.Get_rank()
-        self.MPI_x_coord, = self.MPI_comm.Get_coords(self.MPI_rank)
-        self.MPI_rank_left = self.MPI_comm.Get_cart_rank((self.MPI_x_coord - 1,))
-        self.MPI_rank_right = self.MPI_comm.Get_cart_rank((self.MPI_x_coord + 1,))
+        self.MPI_x_coord, self.MPI_y_coord = self.MPI_comm.Get_coords(self.MPI_rank)
+        self.MPI_rank_left = self.MPI_comm.Get_cart_rank((self.MPI_x_coord - 1, self.MPI_y_coord))
+        self.MPI_rank_right = self.MPI_comm.Get_cart_rank((self.MPI_x_coord + 1, self.MPI_y_coord))
+        self.MPI_rank_down = self.MPI_comm.Get_cart_rank((self.MPI_x_coord, self.MPI_y_coord - 1))
+        self.MPI_rank_up = self.MPI_comm.Get_cart_rank((self.MPI_x_coord, self.MPI_y_coord + 1))
         self.processor_name = MPI.Get_processor_name()
-        # We need an even number of elements in the x direction per process. So let's share them out.
-        elements_per_process, remaining_elements = (int(2*n) for n in divmod(self.n_elements_x_global/2, self.MPI_size))
-        self.n_elements_x = elements_per_process
-        if self.MPI_x_coord < remaining_elements/2:
+
+        # We need an even number of elements in each direction per process. So let's share them out.
+        x_elements_per_process, remaining_x_elements = (int(2*n)
+                                                        for n in divmod(self.n_elements_x_global / 2, self.MPI_size_x))
+        self.n_elements_x = x_elements_per_process
+        if self.MPI_x_coord < remaining_x_elements/2:
             # Give the remaining to the lowest ranked processes:
             self.n_elements_x += 2
 
-        # Where in the global array of elements are we?
-        self.global_index_of_first_element = elements_per_process * self.MPI_x_coord
-        # Include the extra elements some tasks have:
-        if self.MPI_x_coord < remaining_elements/2:
-            self.global_index_of_first_element += 2*self.MPI_x_coord
-        else:
-            self.global_index_of_first_element += remaining_elements
-        self.global_index_of_last_element = self.global_index_of_first_element + self.n_elements_x - 1
+        y_elements_per_process, remaining_y_elements = (int(2*n)
+                                                        for n in divmod(self.n_elements_y_global / 2, self.MPI_size_y))
+        self.n_elements_y = y_elements_per_process
+        if self.MPI_y_coord < remaining_y_elements/2:
+            # Give the remaining to the lowest ranked processes:
+            self.n_elements_y += 2
 
-        self.x_min = self.x_min_global + self.element_width_x * self.global_index_of_first_element
+        # Where in the global array of elements are we?
+        self.global_first_x_element = x_elements_per_process * self.MPI_x_coord
+        # Include the extra elements some tasks have:
+        if self.MPI_x_coord < remaining_x_elements/2:
+            self.global_first_x_element += 2*self.MPI_x_coord
+        else:
+            self.global_first_x_element += remaining_x_elements
+
+        self.global_first_y_element = y_elements_per_process * self.MPI_y_coord
+        # Include the extra elements some tasks have:
+        if self.MPI_y_coord < remaining_y_elements/2:
+            self.global_first_y_element += 2*self.MPI_y_coord
+        else:
+            self.global_first_y_element += remaining_y_elements
+
+        self.x_min = self.x_min_global + self.element_width_x * self.global_first_x_element
         self.x_max = self.x_min + self.element_width_x * self.n_elements_x
 
-        # We only split along the x direction for now:
-        self.n_elements_y = self.n_elements_y_global
-        self.y_min = self.y_min_global
-        self.y_max = self.y_max_global
+        self.y_min = self.y_min_global + self.element_width_y * self.global_first_y_element
+        self.y_max = self.y_min + self.element_width_y * self.n_elements_y
 
-        # The data we want to send left and right isn't in contiguous memory, so we
-        # need to copy it into and out of temporary buffers:
+
+        # The data we want to send to adjacent processes isn't in contiguous
+        # memory, so we need to copy it into and out of temporary buffers:
         self.MPI_left_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
         self.MPI_left_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
         self.MPI_right_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
         self.MPI_right_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
+        self.MPI_up_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_up_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_down_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_down_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
 
-        # We need to tag our data in case there are exactly two MPI tasks, in
-        # which case we need a way other than rank to distinguish between the
-        # messages from the left and the right of that task:
+        # We need to tag our data in case there are exactly two MPI tasks in a
+        # direction, in which case we need a way other than rank to
+        # distinguish between the two messages the two tasks might be sending
+        # each other at one time:
         TAG_LEFT_TO_RIGHT = 0
         TAG_RIGHT_TO_LEFT = 1
+        TAG_DOWN_TO_UP = 2
+        TAG_UP_TO_DOWN = 3
+
+        # Create persistent requests for the data transfers we will regularly be doing:
         self.MPI_send_left = self.MPI_comm.Send_init(self.MPI_left_send_buffer,
                                                      self.MPI_rank_left, tag=TAG_RIGHT_TO_LEFT)
         self.MPI_send_right = self.MPI_comm.Send_init(self.MPI_right_send_buffer,
@@ -151,9 +205,24 @@ class BEC2DSimulator(object):
                                                         self.MPI_rank_left, tag=TAG_LEFT_TO_RIGHT)
         self.MPI_receive_right = self.MPI_comm.Recv_init(self.MPI_right_receive_buffer,
                                                          self.MPI_rank_right, tag=TAG_RIGHT_TO_LEFT)
-        self.MPI_all_requests = [self.MPI_send_left, self.MPI_send_right, self.MPI_receive_left, self.MPI_receive_right]
+        self.MPI_send_down = self.MPI_comm.Send_init(self.MPI_down_send_buffer,
+                                                     self.MPI_rank_down, tag=TAG_UP_TO_DOWN)
+        self.MPI_send_up = self.MPI_comm.Send_init(self.MPI_up_send_buffer,
+                                                      self.MPI_rank_up, tag=TAG_DOWN_TO_UP)
+        self.MPI_receive_down = self.MPI_comm.Recv_init(self.MPI_down_receive_buffer,
+                                                        self.MPI_rank_down, tag=TAG_DOWN_TO_UP)
+        self.MPI_receive_up = self.MPI_comm.Recv_init(self.MPI_up_receive_buffer,
+                                                         self.MPI_rank_up, tag=TAG_UP_TO_DOWN)
+
+        self.MPI_all_requests = [self.MPI_send_left, self.MPI_receive_left,
+                                 self.MPI_send_right, self.MPI_receive_right,
+                                 self.MPI_send_down, self.MPI_receive_down,
+                                 self.MPI_send_up, self.MPI_receive_up]
+
         self.MPI_left_to_right_requests = [self.MPI_send_right, self.MPI_receive_left]
         self.MPI_right_to_left_requests = [self.MPI_send_left, self.MPI_receive_right]
+        self.MPI_down_to_up_requests = [self.MPI_send_up, self.MPI_receive_down]
+        self.MPI_up_to_down_requests = [self.MPI_send_down, self.MPI_receive_up]
 
     def global_dot(self, vec1, vec2):
         """"Dots two vectors and sums result over MPI processes"""
@@ -176,44 +245,61 @@ class BEC2DSimulator(object):
 
     def compute_K_psi(self, psi):
         """Operate on psi with the total kinetic energy operator and return
-        the result"""
-        # x kinetic energy operator operating on psi.
-        Kx_psi = np.einsum('ij,xyjl->xyil', self.Kx,  psi)
+        the result."""
 
-        # Initiate MPI transfer for exchanging x kinetic energy contributions
-        # now, will get back to this after computing y kinetic energy:
+        # Compute Kx_psi and Ky_psi at the border elements first, before
+        # firing off data to other MPI tasks. Then compute Kx_psi and Ky_psi
+        # on the internal elements, before adding in the contributions from
+        # adjacent processes at the last moment. This lets us cater to as much
+        # latency in transport as possible.
+
+        Kx_psi = np.empty(psi.shape, dtype=psi.dtype)
+        Ky_psi = np.empty(psi.shape, dtype=psi.dtype)
+
+        # Evaluating Kx_psi and Ky_psi on the border elements first:
+        Kx_psi[(0, -1), :, :, :] = np.einsum('ij,xyjl->xyil', self.Kx,  psi[(0, -1), :, :, :])
+        Ky_psi[:, (0, -1), :, :] = np.einsum('kl,xyjl->xyjk', self.Ky,  psi[:, (0, -1), :, :])
+
+        # Send values on the border to adjacent MPI tasks:
         self.MPI_left_send_buffer[:] = Kx_psi[0, :, 0, :].reshape(self.n_elements_y * self.Ny)
         self.MPI_right_send_buffer[:] = Kx_psi[-1, :, -1, :].reshape(self.n_elements_y * self.Ny)
+        self.MPI_down_send_buffer[:] = Ky_psi[:, 0, :, 0].reshape(self.n_elements_x * self.Nx)
+        self.MPI_up_send_buffer[:] = Ky_psi[:, -1, :, -1].reshape(self.n_elements_x * self.Nx)
         MPI.Prequest.Startall(self.MPI_all_requests)
 
-        # Add contributions to x kinetic energy from both elements adjacent to each internal edge:
+        # Evaluating Kx_psi and Ky_psi at all internal elements:
+        Kx_psi[1:-1, :, :, :] = np.einsum('ij,xyjl->xyil', self.Kx,  psi[1:-1, :, :, :])
+        Ky_psi[:, 1:-1, :, :] = np.einsum('kl,xyjl->xyjk', self.Ky,  psi[:, 1:-1, :, :])
+
+        # Add contributions to x and y kinetic energy from both elements adjacent to each internal edge:
         Kx_psi[1:, :, 0, :] = Kx_psi[:-1, :, -1, :] = Kx_psi[1:, :, 0, :] + Kx_psi[:-1, :, -1, :]
-
-        # y kinetic energy operator operating on psi.
-        Ky_psi = np.einsum('kl,xyjl->xyjk', self.Ky,  psi)
-
-        # Add contributions to y kinetic energy from both elements adjacent to each internal edge:
         Ky_psi[:, 1:, :, 0] = Ky_psi[:, :-1, :, -1] = Ky_psi[:, 1:, :, 0] + Ky_psi[:, :-1, :, -1]
-        # Periodic boundary conditions in y direction:
-        Ky_psi[:, 0, :, 0] = Ky_psi[:, -1, :, -1] = Ky_psi[:, 0, :, 0] + Ky_psi[:, -1, :, -1]
 
-        # Add contributions to x kinetic energy from adjacent MPI tasks:
+        # Add contributions to x and y kinetic energy from adjacent MPI tasks:
         MPI.Prequest.Waitall(self.MPI_all_requests)
         left_data = self.MPI_left_receive_buffer.reshape((self.n_elements_y, self.Ny))
         right_data = self.MPI_right_receive_buffer.reshape((self.n_elements_y, self.Ny))
-        if psi.dtype is not float:
-            # MPI buffers are complex, but the data is real, and we don't want
-            # to emit a casting warning:
+        down_data = self.MPI_down_receive_buffer.reshape((self.n_elements_x, self.Nx))
+        up_data = self.MPI_up_receive_buffer.reshape((self.n_elements_x, self.Nx))
+
+        if psi.dtype == np.float:
+            # MPI buffers are complex, but the data might be real (in the case
+            # that SOR is being done with a real trial wavefunction), and we
+            # don't want to emit a casting warning:
             left_data = left_data.real
             right_data = right_data.real
+            down_data = down_data.real
+            up_data = up_data.real
         Kx_psi[0, :, 0, :] += left_data
         Kx_psi[-1, :, -1, :] += right_data
+        Ky_psi[:, 0, :, 0] += down_data
+        Ky_psi[:, -1, :, -1] += up_data
 
         return Kx_psi + Ky_psi
 
     def compute_mu(self, psi, V, uncertainty=False):
         """Calculate chemical potential of DVR basis wavefunction psi with
-        potential V"""
+        potential V (same shape as psi), and optionally its uncertainty."""
 
         # Total kinetic energy operator operating on psi:
         K_psi = self.compute_K_psi(psi)
@@ -239,9 +325,9 @@ class BEC2DSimulator(object):
         else:
             return mucalc
 
-    def compute_energy(self, psi, V):
+    def compute_energy(self, psi, V, uncertainty=False):
         """Calculate total energy of DVR basis wavefunction psi with
-        potential V (same shape as psi)"""
+        potential V (same shape as psi), and optionally its uncertainty"""
 
         # Total kinetic energy operator operating on psi:
         K_psi = self.compute_K_psi(psi)
@@ -253,7 +339,16 @@ class BEC2DSimulator(object):
         # interaction energy:
         E_total_psi = K_psi + (V + 0.5*self.g * density) * psi
         Ecalc = self.global_dot(psi, E_total_psi)
-        return Ecalc
+        if uncertainty:
+            E2calc = self.global_dot(E_total_psi, E_total_psi)
+            var_Ecalc = E2calc - Ecalc**2
+            if var_Ecalc < 0:
+                u_Ecalc = 0
+            else:
+                u_Ecalc = np.sqrt(var_Ecalc)
+            return Ecalc, u_Ecalc
+        else:
+            return Ecalc
 
     def find_groundstate(self, psi_guess, V, mu, convergence=1e-14, relaxation_parameter=1.7,
                          output_group=None, output_interval=100, output_callback=None):
@@ -345,33 +440,75 @@ class BEC2DSimulator(object):
             # We operate on all elements at once, but only some DVR basis functions at a time.
             for points, j, k, in points_and_indices:
                 if points is edges:
-                    # We update all the edge points simultaneously.
-                    # x kinetic energy operator operating on psi at the edge points:
-                    Kx_psi[:, :, (0, -1), :] = np.einsum('ij,xyjl->xyil', Kx[(0, -1), :],  psi)
-                    Kx_psi[:, :, :, (0, -1)] = np.einsum('ij,xyjl->xyil', Kx,  psi[:, :, :, (0, -1)])
 
-                    # Initiate MPI transfer for exchanging x kinetic energy contributions
-                    # now, will get back to this after computing y kinetic energy:
+                    # First we compute the values that we will need to send to
+                    # adjacent processes, and then those on the edges of
+                    # internal elements. This allows us to send data with MPI
+                    # as soon as possible and receive as late as possibly, so
+                    # that we are still doing useful work if there is high
+                    # latency.
+
+                    # Evaluating Kx_psi on the left and right edges of the
+                    # left and rightmost elements:
+                    Kx_psi[:] = 0
+                    Ky_psi[:] = 0
+                    # Evaluating Kx_psi on the left and right edges of the
+                    # left and rightmost elements:
+                    Kx_psi[0, :, 0, :] = np.einsum('j,yjl->yl', Kx[0, :], psi[0, :, :, :])
+                    Kx_psi[0, :, -1, :] = np.einsum('j,yjl->yl', Kx[-1, :], psi[0, :, :, :])
+                    Kx_psi[-1, :, 0, :] = np.einsum('j,yjl->yl', Kx[0, :], psi[-1, :, :, :])
+                    Kx_psi[-1, :, -1, :] = np.einsum('j,yjl->yl', Kx[-1, :], psi[-1, :, :, :])
+                    # Evaluating Ky_psi on the upper and lower edges of the
+                    # top and bottom elements:
+                    Ky_psi[:, 0, :, 0] = np.einsum('l,xjl->xj', Ky[0, :], psi[:, 0, :, :])
+                    Ky_psi[:, 0, :, -1] = np.einsum('l,xjl->xj', Ky[-1, :], psi[:, 0, :, :])
+                    Ky_psi[:, -1, :, 0] = np.einsum('l,xjl->xj', Ky[0, :], psi[:, -1, :, :])
+                    Ky_psi[:, -1, :, -1] = np.einsum('l,xjl->xj', Ky[-1, :], psi[:, -1, :, :])
+
+                    # Send values on the border to adjacent MPI tasks:
                     self.MPI_left_send_buffer[:] = Kx_psi[0, :, 0, :].reshape(self.n_elements_y * self.Ny)
                     self.MPI_right_send_buffer[:] = Kx_psi[-1, :, -1, :].reshape(self.n_elements_y * self.Ny)
+                    self.MPI_down_send_buffer[:] = Ky_psi[:, 0, :, 0].reshape(self.n_elements_x * self.Nx)
+                    self.MPI_up_send_buffer[:] = Ky_psi[:, -1, :, -1].reshape(self.n_elements_x * self.Nx)
                     MPI.Prequest.Startall(self.MPI_all_requests)
 
-                    # Add contributions to x kinetic energy from both elements adjacent to each internal edge:
+                    # Evaluating Kx_psi at the rest of the edges we haven't
+                    # done yet. Man, there's some crazy indexing going on
+                    # here. The first line below is doing the left and right
+                    # edges of all elements except the leftmost and rightmost
+                    # elements, which we've already done. The second line is
+                    # doing the top and bottom edges of all elements, but
+                    # excluding the corners because they were already done by
+                    # the first line.
+                    Kx_psi[1:-1, :, (0, -1), :] = np.einsum('ij,xyjl->xyil', Kx[(0, -1), :],  psi[1:-1, :, :, :])
+                    Kx_psi[:, :, 1:-1, (0, -1)] = np.einsum('ij,xyjl->xyil', Kx[1:-1, :],  psi[:, :, :, (0, -1)])
+                    # Same for Ky_psi:
+                    Ky_psi[:, 1:-1, :, (0, -1)] = np.einsum('kl,xyjl->xyjk', Ky[(0, -1), :],  psi[:, 1:-1, :, :])
+                    Ky_psi[:, :, (0, -1), 1:-1] = np.einsum('kl,xyjl->xyjk', Ky[1:-1, :],  psi[:, :, (0, -1), :])
+
+                    # Add contributions to x and y kinetic energy from both
+                    # elements adjacent to each internal edge:
                     Kx_psi[1:, :, 0, :] = Kx_psi[:-1, :, -1, :] = Kx_psi[1:, :, 0, :] + Kx_psi[:-1, :, -1, :]
-
-                    # y kinetic energy operator operating on psi at the edge points:
-                    Ky_psi[:, :, (0, -1), :] = np.einsum('kl,xyjl->xyjk', Ky,  psi[:, :, (0, -1), :])
-                    Ky_psi[:, :, :, (0, -1)] = np.einsum('kl,xyjl->xyjk', Ky[(0, -1), :],  psi)
-
-                    # Add contributions to y kinetic energy from both elements adjacent to each internal edge:
                     Ky_psi[:, 1:, :, 0] = Ky_psi[:, :-1, :, -1] = Ky_psi[:, 1:, :, 0] + Ky_psi[:, :-1, :, -1]
-                    # Periodic boundary conditions in y direction:
-                    Ky_psi[:, 0, :, 0] = Ky_psi[:, -1, :, -1] = Ky_psi[:, 0, :, 0] + Ky_psi[:, -1, :, -1]
 
-                    # Add contributions to x kinetic energy from adjacent MPI tasks:
+                    # Add contributions to x and y kinetic energy from adjacent MPI tasks:
                     MPI.Prequest.Waitall(self.MPI_all_requests)
-                    Kx_psi[0, :, 0, :] += self.MPI_left_receive_buffer.reshape((self.n_elements_y, self.Ny)).real
-                    Kx_psi[-1, :, -1, :] += self.MPI_right_receive_buffer.reshape((self.n_elements_y, self.Ny)).real
+                    left_data = self.MPI_left_receive_buffer.reshape((self.n_elements_y, self.Ny))
+                    right_data = self.MPI_right_receive_buffer.reshape((self.n_elements_y, self.Ny))
+                    down_data = self.MPI_down_receive_buffer.reshape((self.n_elements_x, self.Nx))
+                    up_data = self.MPI_up_receive_buffer.reshape((self.n_elements_x, self.Nx))
+                    if psi.dtype is not float:
+                        # MPI buffers are complex, but the data might be real (in the case
+                        # that SOR is being done with a real trial wavefunction), and we
+                        # don't want to emit a casting warning:
+                        left_data = left_data.real
+                        right_data = right_data.real
+                        down_data = down_data.real
+                        up_data = up_data.real
+                    Kx_psi[0, :, 0, :] += left_data
+                    Kx_psi[-1, :, -1, :] += right_data
+                    Ky_psi[:, 0, :, 0] += down_data
+                    Ky_psi[:, -1, :, -1] += up_data
                 else:
                     # x and y kinetic energy operator operating on psi at one internal point:
                     Kx_psi[:, :, j, k] = np.einsum('j,xyj->xy', Kx[j, :],  psi[:, :, :, k])
@@ -686,15 +823,21 @@ class BEC2DSimulator(object):
         return psi
 
     def output(self, output_group, psi, output_log):
-        output_row = self.output_row.setdefault(output_group, 0)
         with h5py.File(self.output_file, driver='mpio', comm=MPI.COMM_WORLD) as f:
             group = f['output'][output_group]
             psi_dataset = group['psi']
             output_log_dataset = group['output_log']
-            start = self.global_index_of_first_element
-            end = self.global_index_of_last_element + 1
+
+            start_x = self.global_first_x_element
+            end_x = start_x + self.n_elements_x
+            start_y = self.global_first_y_element
+            end_y = start_y + self.n_elements_y
+
+            output_row = self.output_row.setdefault(output_group, 0)
             psi_dataset.resize((output_row + 1,) + psi.shape)
-            psi_dataset[output_row, start:end, :, :, :] = psi
             output_log_dataset.resize((output_row + 1,))
+
+            psi_dataset[output_row, start_x:end_x, start_y:end_y, :, :] = psi
             output_log_dataset[output_row] = output_log
-            self.output_row[output_group] += 1
+
+        self.output_row[output_group] += 1

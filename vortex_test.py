@@ -3,6 +3,8 @@ import os
 import cPickle as pickle
 
 import numpy as np
+from PyQt4 import QtCore, QtGui
+from qtutils import inthread, inmain_decorator
 
 from BEC2D import BEC2DSimulator
 
@@ -42,24 +44,36 @@ y = simulator.y
 # The Harmonic trap at our gridpoints, (n_elements x N):
 V = 0.5*m*omega**2*(x**2 + y**2)
 
-import matplotlib
+@inmain_decorator()
+def plot(psi, output_log):
+    if SHOW_PLOT:
+        x_plot, y_plot, psi_interp = simulator.elements.interpolate_vector(psi, Nx, Ny)
+        rho_plot = np.abs(psi_interp)**2
+        phase_plot = np.angle(psi_interp)
+        density_image_view.setImage(rho_plot)
+        phase_image_view.setImage(phase_plot)
 
-plot_number = 0
+SHOW_PLOT = True
+# SHOW_PLOT = False
+if not os.getenv('DISPLAY'):
+    # But not if there is no x server:
+    SHOW_PLOT = False
 
-def plot(*args):
-    global plot_number
-    psi = args[-1]
-    x_plot, y_plot, psi_interp = simulator.elements.interpolate_vector(psi, Nx, Ny)
-    rho = np.abs(psi_interp)**2
-    phase = np.angle(psi_interp)
+if SHOW_PLOT:
+    import pyqtgraph as pg
 
-    hsl = np.zeros(psi_interp.shape + (3,))
-    hsl[:, :, 2] = rho/rho.max()
-    hsl[:, :, 0] = np.array((phase + pi)/(2*pi))
-    hsl[:, :, 1] = 0.33333
-    rgb = matplotlib.colors.hsv_to_rgb(hsl)
-    matplotlib.image.imsave('plots/plot%04d.png' % plot_number, rgb)
-    plot_number += 1
+    qapplication = QtGui.QApplication([])
+    win = QtGui.QWidget()
+    win.resize(800,800)
+    density_image_view = pg.ImageView()
+    phase_image_view = pg.ImageView()
+    layout = QtGui.QVBoxLayout(win)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+    layout.addWidget(density_image_view)
+    layout.addWidget(phase_image_view)
+    win.show()
+    win.setWindowTitle('MPI task %d'%simulator.MPI_rank)
 
 def initial_guess(x, y):
         sigma_x = 0.5*R
@@ -77,7 +91,7 @@ def run_sims():
     else:
         psi = simulator.elements.make_vector(initial_guess)
         simulator.normalise(psi, N_2D)
-        psi = simulator.find_groundstate(psi, V, mu, output_group='initial')
+        psi = simulator.find_groundstate(psi, V, mu, output_group='initial', output_interval=10, output_callback=plot)
 
         # Scatter some vortices randomly about.
         # Ensure all MPI tasks agree on the location of the vortices, by
@@ -98,5 +112,18 @@ def run_sims():
     psi = simulator.evolve(psi, V, t_final=1e-3, output_group=None)
     print('time taken:', time.time() - start_time)
 
-run_sims()
+if not SHOW_PLOT:
+    run_sims()
+else:
+    # If we're plotting stuff, Qt will need the main thread:
+    inthread(run_sims)
 
+    import signal
+    # Let the interpreter run every 500ms so it sees Ctrl-C interrupts:
+    timer = QtCore.QTimer()
+    timer.start(500)
+    timer.timeout.connect(lambda: None)  # Let the interpreter run each 500 ms.
+    # Upon seeing a ctrl-c interrupt, quit the event loop
+    signal.signal(signal.SIGINT, lambda *args: qapplication.exit())
+
+    qapplication.exec_()
