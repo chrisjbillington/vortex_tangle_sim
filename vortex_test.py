@@ -61,9 +61,9 @@ def plot(psi, output_log):
         rgb = matplotlib.colors.hsv_to_rgb(hsl)
         if image_item is None:
             image_item = pg.ImageItem(rgb)
-            image_view.addItem(image_item)
-            image_window.resize(*rgb.shape[:-1])
-            image_window.show()
+            view_box.addItem(image_item)
+            graphics_view.resize(2*rgb.shape[0], 2*rgb.shape[1])
+            graphics_view.show()
         image_item.updateImage(rgb)
 
 SHOW_PLOT = True
@@ -75,11 +75,11 @@ if not os.getenv('DISPLAY'):
 if SHOW_PLOT:
     import pyqtgraph as pg
     qapplication = QtGui.QApplication([])
-    image_window = pg.GraphicsView()
-    image_window.setWindowTitle('MPI task %d'%simulator.MPI_rank)
-    image_view = pg.ViewBox()
-    image_window.setCentralItem(image_view)
-    image_view.setAspectLocked(True)
+    graphics_view = pg.GraphicsView()
+    graphics_view.setWindowTitle('MPI task %d'%simulator.MPI_rank)
+    view_box = pg.ViewBox()
+    graphics_view.setCentralItem(view_box)
+    view_box.setAspectLocked(True)
     image_item = None
 
 def initial_guess(x, y):
@@ -98,7 +98,7 @@ def run_sims():
     else:
         psi = simulator.elements.make_vector(initial_guess)
         simulator.normalise(psi, N_2D)
-        psi = simulator.find_groundstate(psi, V, mu, output_group='initial', output_interval=10, output_callback=plot)
+        psi = simulator.find_groundstate(psi, V, mu, output_group='initial', output_interval=100, output_callback=plot)
 
         # Scatter some vortices randomly about.
         # Ensure all MPI tasks agree on the location of the vortices, by
@@ -116,7 +116,8 @@ def run_sims():
     # Evolve in time:
     import time
     start_time = time.time()
-    psi = simulator.evolve(psi, V, t_final=400e-6, output_group=None, output_callback=plot, output_interval=10)
+    psi = simulator.evolve(psi, V, t_final=400e-6, output_group=None,
+                           output_callback=plot, output_interval=10)
     print('time taken:', time.time() - start_time)
 
 if not SHOW_PLOT:
