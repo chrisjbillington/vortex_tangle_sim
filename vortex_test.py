@@ -6,6 +6,8 @@ import numpy as np
 from PyQt4 import QtCore, QtGui
 from qtutils import inthread, inmain_decorator
 
+import matplotlib
+
 from BEC2D import BEC2DSimulator
 
 # Constants:
@@ -47,11 +49,22 @@ V = 0.5*m*omega**2*(x**2 + y**2)
 @inmain_decorator()
 def plot(psi, output_log):
     if SHOW_PLOT:
+        global image_item
         x_plot, y_plot, psi_interp = simulator.elements.interpolate_vector(psi, Nx, Ny)
-        rho_plot = np.abs(psi_interp)**2
-        phase_plot = np.angle(psi_interp)
-        density_image_view.setImage(rho_plot)
-        phase_image_view.setImage(phase_plot)
+        rho = np.abs(psi_interp)**2
+        phase = np.angle(psi_interp)
+
+        hsl = np.zeros(psi_interp.shape + (3,))
+        hsl[:, :, 2] = rho/rho.max()
+        hsl[:, :, 0] = np.array((phase + pi)/(2*pi))
+        hsl[:, :, 1] = 0.33333
+        rgb = matplotlib.colors.hsv_to_rgb(hsl)
+        if image_item is None:
+            image_item = pg.ImageItem(rgb)
+            image_view.addItem(image_item)
+            image_window.resize(*rgb.shape[:-1])
+            image_window.show()
+        image_item.updateImage(rgb)
 
 SHOW_PLOT = True
 # SHOW_PLOT = False
@@ -61,19 +74,13 @@ if not os.getenv('DISPLAY'):
 
 if SHOW_PLOT:
     import pyqtgraph as pg
-
     qapplication = QtGui.QApplication([])
-    win = QtGui.QWidget()
-    win.resize(800,800)
-    density_image_view = pg.ImageView()
-    phase_image_view = pg.ImageView()
-    layout = QtGui.QVBoxLayout(win)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(0)
-    layout.addWidget(density_image_view)
-    layout.addWidget(phase_image_view)
-    win.show()
-    win.setWindowTitle('MPI task %d'%simulator.MPI_rank)
+    image_window = pg.GraphicsView()
+    image_window.setWindowTitle('MPI task %d'%simulator.MPI_rank)
+    image_view = pg.ViewBox()
+    image_window.setCentralItem(image_view)
+    image_view.setAspectLocked(True)
+    image_item = None
 
 def initial_guess(x, y):
         sigma_x = 0.5*R
@@ -103,13 +110,13 @@ def run_sims():
             x_vortex = np.random.normal(0, scale=R)
             y_vortex = np.random.normal(0, scale=R)
             psi[:] *= np.exp(sign * 1j*np.arctan2(simulator.y - y_vortex, simulator.x - x_vortex))
-        psi = simulator.evolve(psi, V, t_final=400e-6, output_group='vortices', imaginary_time=True)
+        psi = simulator.evolve(psi, V, t_final=400e-6, output_group='vortices', imaginary_time=True, output_callback=plot)
         with open('psi.pickle', 'w') as f:
             pickle.dump(psi, f)
     # Evolve in time:
     import time
     start_time = time.time()
-    psi = simulator.evolve(psi, V, t_final=1e-3, output_group=None)
+    psi = simulator.evolve(psi, V, t_final=400e-6, output_group=None, output_callback=plot, output_interval=10)
     print('time taken:', time.time() - start_time)
 
 if not SHOW_PLOT:

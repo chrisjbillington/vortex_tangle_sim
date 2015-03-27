@@ -588,75 +588,122 @@ class BEC2DSimulator(object):
         odd_internal_elements_y = odd_elements_y & internal_elements_y
         even_internal_elements_y = even_elements_y & internal_elements_y
 
-        def copy_x_edges_odd_to_even(psi):
-            """Copy odd endpoints -> adjacent even endpoints in x direction,
-            including to and from adjacent MPI tasks:"""
-            # Send values to the right and and receive from the left adjacent
-            # processes. We're sending as early as possible and we'll deal with
-            # the received data after doing other internal copying that we need to
-            # do anyway (this minimises synchronisation overhead). The first
-            # element in the x direction, number 0, is even, so we need to receive
-            # into it but not send. The last element, number n_elements_x - 1, is
-            # odd, so we need to send from it.
+        def do_odd_Kx_evolution():
+            # First we evolve the right border elements before firing off data
+            # to the MPI task to the right of us. Then we evolve internal
+            # elements. This allows us to send data with MPI as soon as
+            # possible and receive as late as possibly, so that we are still
+            # doing useful work if there is high latency.
 
-            # TODO: If there is still too much latency from this, split up the
-            # einsum line in the main loop to do the edge elements first, then
-            # initiate communication before doing einsum on all the internal
-            # elements.
+            # Evolve psi on the right border elements first:
+            psi[-1, : ,:, :] = np.einsum('ij,yjl->yil', U_Kx_half_substep, psi[-1, :, :, :])
+
+            # Send values to the right and and receive from the left adjacent
+            # MPI tasks:
             self.MPI_right_send_buffer[:] = psi[-1, :, -1, :].reshape(self.n_elements_y * self.Ny)
             MPI.Prequest.Startall(self.MPI_left_to_right_requests)
 
-            # Copy values from odd -> even elements at internal edges in x direction:
+            # Evolving psi at the internal odd elements:
+            psi[odd_internal_elements_x, :, :, :] = np.einsum('ij,xyjl->xyil',
+                                                               U_Kx_half_substep, psi[odd_internal_elements_x, :, :, :])
+
+            # Copy values from odd -> even elements at internal edges in x
+            # direction:
             psi[even_elements_x, :, -1, :] = psi[odd_elements_x, :, 0, :]
             psi[even_internal_elements_x, :, 0, :] = psi[odd_internal_elements_x, :, -1, :]
 
-            # Now is the latest we can wait without the data from adjacent
-            # processes. Wait for communication to complete:
+            # Copy values received from the left adjacent MPI task to the left
+            # border points:
             MPI.Prequest.Waitall(self.MPI_left_to_right_requests)
             # Copy over neighbouring process's value for psi at the boundary:
             psi[0, :, 0, :] = self.MPI_left_receive_buffer.reshape((self.n_elements_y, self.Ny))
 
-        def copy_x_edges_even_to_odd(psi):
-            """Copy even endpoints -> adjacent odd endpoints in x direction,
-            including to and from adjacent MPI tasks:"""
-            # Send values to the left and and receive from the right adjacent
-            # processes. We're sending as early as possible and we'll deal with
-            # the received data after doing other internal copying that we need to
-            # do anyway (this minimises synchronisation overhead). The first
-            # element in the x direction, number 0, is even, so we need to send
-            # from it but not receive. The last element, number n_elements_x - 1, is
-            # odd, so we need to receive into it.
+        def do_even_Kx_evolution():
+            # First we evolve the left border elements before firing off data
+            # to the MPI task to the left of us. Then we evolve internal
+            # elements. This allows us to send data with MPI as soon as
+            # possible and receive as late as possibly, so that we are still
+            # doing useful work if there is high latency.
 
-            # TODO: If there is still too much latency from this, split up the
-            # einsum line in the main loop to do the edge elements first, then
-            # initiate communication before doing einsum on all the internal
-            # elements.
-            self.MPI_left_send_buffer[:] = psi[0, :, 0, :].reshape(self.n_elements_y * self.Ny)
+            # Evolve psi on the left border elements first:
+            psi[0] = np.einsum('ij,yjl->yil', U_Kx_full_substep, psi[0])
+
+            # Send values to the left and and receive from the right adjacent
+            # MPI tasks:
+            self.MPI_left_send_buffer[:] = psi[0, :, 0].reshape(self.n_elements_y * self.Ny)
             MPI.Prequest.Startall(self.MPI_right_to_left_requests)
 
-            # Copy values from even -> odd elements at internal edges in x direction:
-            psi[odd_internal_elements_x, :, -1, :] = psi[even_internal_elements_x, :, 0, :]
-            psi[odd_elements_x, :, 0, :] = psi[even_elements_x, :, -1, :]
+            # Evolving psi at the internal even elements:
+            psi[even_internal_elements_x] = np.einsum('ij,xyjl->xyil',
+                                                      U_Kx_full_substep, psi[even_internal_elements_x])
 
-            # Now is the latest we can wait without the data from adjacent
-            # processes. Wait for communication to complete:
+            # Copy values from even -> odd elements at internal edges in x
+            # direction:
+            psi[odd_internal_elements_x, :, -1, :] = psi[even_internal_elements_x, :, 0]
+            psi[odd_elements_x, :, 0] = psi[even_elements_x, :, -1]
+
+            # Copy values received from the right adjacent MPI task to the
+            # right border points:
             MPI.Prequest.Waitall(self.MPI_right_to_left_requests)
             # Copy over neighbouring process's value for psi at the boundary:
-            psi[-1, :, -1, :] = self.MPI_right_receive_buffer.reshape((self.n_elements_y, self.Ny))
+            psi[-1, :, -1] = self.MPI_right_receive_buffer.reshape((self.n_elements_y, self.Ny))
 
-        def copy_y_edges_odd_to_even(psi):
-            """Copy odd endpoints -> adjacent even endpoints in y direction. The y
-            dimension is not split among MPI tasks, so there is no IPC here."""
+
+        def do_odd_Ky_evolution():
+            # First we evolve the upper border elements before firing off data
+            # to the MPI task above us. Then we evolve internal elements. This
+            # allows us to send data with MPI as soon as possible and receive
+            # as late as possibly, so that we are still doing useful work if
+            # there is high latency.
+
+            # Evolve psi on the upper border elements first:
+            psi[:, -1] = np.einsum('kl,xjl->xjk', U_Ky_half_substep, psi[:, -1])
+
+            # Send values to the upper and and receive from the lower adjacent
+            # MPI tasks:
+            self.MPI_up_send_buffer[:] = psi[:, -1, :, -1].reshape(self.n_elements_x * self.Nx)
+            MPI.Prequest.Startall(self.MPI_down_to_up_requests)
+
+            # Evolving psi at the internal odd elements:
+            psi[:, odd_internal_elements_y] = np.einsum('kl,xyjl->xyjk',
+                                                        U_Ky_half_substep, psi[:, odd_internal_elements_y])
+
+            # Copy values from odd -> even elements at internal edges in y
+            # direction:
             psi[:, even_elements_y, :, -1] = psi[:, odd_elements_y, :, 0]
             psi[:, even_internal_elements_y, :, 0] = psi[:, odd_internal_elements_y, :, -1]
-            psi[:, 0, :, 0] = psi[:, -1, :, -1] # periodic boundary conditions
 
-        def copy_y_edges_even_to_odd(psi):
-            """Copy even endpoints -> adjacent odd endpoints in y direction. The y
-            dimension is not split among MPI tasks, so there is no IPC here."""
+            # Copy values received from the lower adjacent MPI task to the
+            # lower border points:
+            MPI.Prequest.Waitall(self.MPI_down_to_up_requests)
+            psi[:, 0, :, 0] = self.MPI_down_receive_buffer.reshape((self.n_elements_x, self.Nx))
+
+        def do_even_Ky_evolution():
+            # First we evolve the lower border elements before firing off data
+            # to the MPI task below us. Then we evolve internal elements. This
+            # allows us to send data with MPI as soon as possible and receive
+            # as late as possibly, so that we are still doing useful work if
+            # there is high latency.
+            psi[:, 0] = np.einsum('kl,xjl->xjk', U_Ky_full_substep, psi[:, 0])
+
+            # Send values to the lower and and receive from the upper adjacent
+            # MPI tasks:
+            self.MPI_down_send_buffer[:] = psi[:, 0, :, 0].reshape(self.n_elements_x * self.Nx)
+            MPI.Prequest.Startall(self.MPI_up_to_down_requests)
+
+            # Evolving psi at the internal odd elements:
+            psi[:, even_internal_elements_y] = np.einsum('kl,xyjl->xyjk',
+                                                         U_Ky_full_substep, psi[:, even_internal_elements_y])
+
+            # Copy values from even -> odd elements at internal edges in y
+            # direction:
             psi[:, odd_internal_elements_y, :, -1] = psi[:, even_internal_elements_y, :, 0]
             psi[:, odd_elements_y, :, 0] = psi[:, even_elements_y, :, -1]
-            psi[:, -1, :, -1] = psi[:, 0, :, 0] # periodic boundary conditions
+
+            # Copy values received from the upper adjacent MPI task to the
+            # upper border points:
+            MPI.Prequest.Waitall(self.MPI_up_to_down_requests)
+            psi[:, -1, :, -1] = self.MPI_up_receive_buffer.reshape((self.n_elements_x, self.Nx))
 
         # Now we construct some unitary time evolution operators. We are using
         # the fourth order "real space product" split operator method, which
@@ -779,21 +826,17 @@ class BEC2DSimulator(object):
                 # Evolve for half a substep with potential evolution operator:
                 psi[:] = U_V_half_substep*psi
 
-                # Evolution with x kinetic energy evolution operator, using odd-even-odd split step method:
-                psi[odd_elements_x] = np.einsum('ij,xyjl->xyil', U_Kx_half_substep, psi[odd_elements_x, :, :, :])
-                copy_x_edges_odd_to_even(psi)
-                psi[even_elements_x] = np.einsum('ij,xyjl->xyil', U_Kx_full_substep, psi[even_elements_x, :, :, :])
-                copy_x_edges_even_to_odd(psi)
-                psi[odd_elements_x] = np.einsum('ij,xyjl->xyil', U_Kx_half_substep, psi[odd_elements_x, :, :, :])
-                copy_x_edges_odd_to_even(psi)
+                # Evolution with x kinetic energy evolution operator, using
+                # odd-even-odd split step method:
+                do_odd_Kx_evolution()
+                do_even_Kx_evolution()
+                do_odd_Kx_evolution()
 
-                # Evolution with y kinetic energy evolution operator, using odd-even-odd split step method:
-                psi[:, odd_elements_y] = np.einsum('kl,xyjl->xyjk', U_Ky_half_substep, psi[:, odd_elements_y, :, :])
-                copy_y_edges_odd_to_even(psi)
-                psi[:, even_elements_y] = np.einsum('kl,xyjl->xyjk', U_Ky_full_substep, psi[:, even_elements_y, :, :])
-                copy_y_edges_even_to_odd(psi)
-                psi[:, odd_elements_y] = np.einsum('kl,xyjl->xyjk', U_Ky_half_substep, psi[:, odd_elements_y, :, :])
-                copy_y_edges_odd_to_even(psi)
+                # Evolution with y kinetic energy evolution operator, using
+                # odd-even-odd split step method:
+                do_odd_Ky_evolution()
+                do_even_Ky_evolution()
+                do_odd_Ky_evolution()
 
                 # Calculate potential energy evolution operator for half a step
                 if imaginary_time:
