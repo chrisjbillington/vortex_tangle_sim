@@ -83,42 +83,33 @@ if SHOW_PLOT:
     image_item = None
 
 def initial_guess(x, y):
-        sigma_x = 0.5*R
-        sigma_y = 0.5*R
-        f = np.sqrt(np.exp(-x**2/(2*sigma_x**2) - y**2/(2*sigma_y**2)))
-        return f
+    sigma_x = 0.5*R
+    sigma_y = 0.5*R
+    f = np.sqrt(np.exp(-x**2/(2*sigma_x**2) - y**2/(2*sigma_y**2)))
+    return f
 
 def run_sims():
     # import lineprofiler
     # lineprofiler.setup(outfile='lineprofile-%d.txt'%MPI_rank)
 
-    if os.path.exists('psi.pickle'):
-        with open('psi.pickle') as f:
-            psi = pickle.load(f)
-    else:
-        psi = simulator.elements.make_vector(initial_guess)
-        simulator.normalise(psi, N_2D)
-        psi = simulator.find_groundstate(psi, V, mu, output_group='initial', output_interval=100, output_callback=plot)
+    psi = simulator.elements.make_vector(initial_guess)
+    simulator.normalise(psi, N_2D)
+    psi = simulator.find_groundstate(psi, V, mu, output_group='initial', output_interval=100, output_callback=plot)
 
-        # Scatter some vortices randomly about.
-        # Ensure all MPI tasks agree on the location of the vortices, by
-        # seeding the pseudorandom number generator with the same seed in
-        # each process:
-        np.random.seed(42)
-        for i in range(30):
-            sign = np.sign(np.random.normal())
-            x_vortex = np.random.normal(0, scale=R)
-            y_vortex = np.random.normal(0, scale=R)
-            psi[:] *= np.exp(sign * 1j*np.arctan2(simulator.y - y_vortex, simulator.x - x_vortex))
-        psi = simulator.evolve(psi, V, t_final=400e-6, output_group='vortices', imaginary_time=True, output_callback=plot)
-        with open('psi.pickle', 'w') as f:
-            pickle.dump(psi, f)
+    # Scatter some vortices randomly about.
+    # Ensure all MPI tasks agree on the location of the vortices, by
+    # seeding the pseudorandom number generator with the same seed in
+    # each process:
+    np.random.seed(42)
+    for i in range(30):
+        sign = np.sign(np.random.normal())
+        x_vortex = np.random.normal(0, scale=R)
+        y_vortex = np.random.normal(0, scale=R)
+        psi[:] *= np.exp(sign * 1j*np.arctan2(simulator.y - y_vortex, simulator.x - x_vortex))
+    psi = simulator.evolve(psi, V, t_final=400e-6, output_group='vortices', imaginary_time=True, output_callback=plot)
     # Evolve in time:
-    import time
-    start_time = time.time()
-    psi = simulator.evolve(psi, V, t_final=400e-6, output_group=None,
+    psi = simulator.evolve(psi, V, t_final=np.inf, output_group='time evolution',
                            output_callback=plot, output_interval=10)
-    print('time taken:', time.time() - start_time)
 
 if not SHOW_PLOT:
     run_sims()

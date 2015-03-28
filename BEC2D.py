@@ -557,7 +557,7 @@ class BEC2DSimulator(object):
                output_group=None, output_interval=100, output_callback=None):
         dx_min = np.diff(self.x[0, 0, :, 0]).min()
         dy_min = np.diff(self.y[0, 0, 0, :]).min()
-        dt = timestep_factor * min(dx_min, dy_min)**2 * self.m / hbar
+        dt = timestep_factor * min(dx_min, dy_min)**2 * self.m / (2 * hbar)
         if not self.MPI_rank: # Only one process prints to stdout:
             print('\n==========')
             if imaginary_time:
