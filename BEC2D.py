@@ -1,4 +1,5 @@
 from __future__ import division, print_function
+import os
 import sys
 import time
 import traceback
@@ -68,6 +69,7 @@ class BEC2DSimulator(object):
                                          self.x_min, self.x_max, self.y_min, self.y_max)
 
         self.shape = self.elements.shape
+        self.global_shape = (self.n_elements_x_global, self.n_elements_y_global, self.Nx, self.Ny)
 
         # Second derivative operators, each (N, N):
         self.grad2x, self.grad2y = self.elements.second_derivative_operators()
@@ -85,7 +87,7 @@ class BEC2DSimulator(object):
         self.Kx = -hbar**2 / (2 * self.m) * self.grad2x
         self.Ky = -hbar**2 / (2 * self.m) * self.grad2y
 
-        if self.output_file is not None:
+        if self.output_file is not None and not os.path.exists(self.output_file):
             with h5py.File(self.output_file, 'w', driver='mpio', comm=MPI.COMM_WORLD) as f:
                 f.attrs['x_min_global'] = x_min_global
                 f.attrs['x_max_global'] = x_max_global
@@ -117,9 +119,9 @@ class BEC2DSimulator(object):
                 f.create_dataset('y', data=self.y)
                 f.create_group('output')
 
-            # A dictionary for keeping track of what row we're up to in file
-            # output in each group:
-            self.output_row = {}
+        # A dictionary for keeping track of what row we're up to in file
+        # output in each group:
+        self.output_row = {}
 
     def _setup_MPI_grid(self):
         """Split space up according to the number of MPI tasks. Set instance
@@ -401,13 +403,16 @@ class BEC2DSimulator(object):
 
         if output_group is not None:
             with h5py.File(self.output_file, driver='mpio', comm=MPI.COMM_WORLD) as f:
-                group = f['output'].create_group(output_group)
-                group.attrs['start_time'] = time.time()
-                group.create_dataset('V', data=V)
-                group.create_dataset('psi', (0,) + psi.shape, maxshape=(None,) + psi.shape, dtype=psi.dtype)
-                output_log_dtype = [('step_number', int), ('mucalc', int),
-                                    ('convergence', float), ('time_per_step', float)]
-                group.create_dataset('output_log', (0,), maxshape=(None,), dtype=output_log_dtype)
+                if not output_group in f['output']:
+                    group = f['output'].create_group(output_group)
+                    group.attrs['start_time'] = time.time()
+                    group.create_dataset('psi', (0,) + self.global_shape,
+                                         maxshape=(None,) + self.global_shape, dtype=psi.dtype)
+                    output_log_dtype = [('step_number', int), ('mucalc', int),
+                                        ('convergence', float), ('time_per_step', float)]
+                    group.create_dataset('output_log', (0,), maxshape=(None,), dtype=output_log_dtype)
+                else:
+                    self.output_row[output_group] = group = len(f['output'][output_group]['output_log']) - 1
 
         def do_output():
             mucalc = self.compute_mu(psi, V)
@@ -553,11 +558,12 @@ class BEC2DSimulator(object):
         return psi
 
 
-    def evolve(self, psi, V, t_final, imaginary_time=False, timestep_factor=1,
-               output_group=None, output_interval=100, output_callback=None):
+    def evolve(self, psi, V, t_initial=0, t_final=np.inf, imaginary_time=False, timestep_factor=1,
+               output_group=None, output_interval=100, output_callback=None, rk4=False):
         dx_min = np.diff(self.x[0, 0, :, 0]).min()
         dy_min = np.diff(self.y[0, 0, 0, :]).min()
         dt = timestep_factor * min(dx_min, dy_min)**2 * self.m / (2 * hbar)
+
         if not self.MPI_rank: # Only one process prints to stdout:
             print('\n==========')
             if imaginary_time:
@@ -647,7 +653,6 @@ class BEC2DSimulator(object):
             MPI.Prequest.Waitall(self.MPI_right_to_left_requests)
             # Copy over neighbouring process's value for psi at the boundary:
             psi[-1, :, -1] = self.MPI_right_receive_buffer.reshape((self.n_elements_y, self.Ny))
-
 
         def do_odd_Ky_evolution():
             # First we evolve the upper border elements before firing off data
@@ -765,16 +770,19 @@ class BEC2DSimulator(object):
 
         if output_group is not None:
             with h5py.File(self.output_file, driver='mpio', comm=MPI.COMM_WORLD) as f:
-                group = f['output'].create_group(output_group)
-                group.attrs['start_time'] = time.time()
-                group.attrs['dt'] = dt
-                group.attrs['t_final'] = t_final
-                group.attrs['imaginary_time'] = imaginary_time
-                group.create_dataset('V', data=V)
-                group.create_dataset('psi', (0,) + psi.shape, maxshape=(None,) + psi.shape, dtype=psi.dtype)
-                output_log_dtype = [('step_number', int), ('time', float),
-                                    ('number_err', float), ('energy_err', float), ('time_per_step', float)]
-                group.create_dataset('output_log', (0,), maxshape=(None,), dtype=output_log_dtype)
+                if not output_group in f['output']:
+                    group = f['output'].create_group(output_group)
+                    group.attrs['start_time'] = time.time()
+                    group.attrs['dt'] = dt
+                    group.attrs['t_final'] = t_final
+                    group.attrs['imaginary_time'] = imaginary_time
+                    group.create_dataset('psi', (0,) + self.global_shape,
+                                         maxshape=(None,) + self.global_shape, dtype=psi.dtype)
+                    output_log_dtype = [('step_number', int), ('time', float),
+                                        ('number_err', float), ('energy_err', float), ('time_per_step', float)]
+                    group.create_dataset('output_log', (0,), maxshape=(None,), dtype=output_log_dtype)
+                else:
+                    self.output_row[output_group] = group = len(f['output'][output_group]['output_log']) - 1
 
         def do_output():
             if imaginary_time:
@@ -799,7 +807,7 @@ class BEC2DSimulator(object):
                     traceback.print_exc()
 
         i = 0
-        t = 0
+        t = t_initial
 
         # Output the initial state, which is the zeroth timestep.
         do_output()
@@ -807,50 +815,69 @@ class BEC2DSimulator(object):
 
         # Start simulating:
         start_time = time.time()
-        while t < t_final:
-            for substep_number, substep in enumerate(substeps):
-                (sub_dt, U_V_half_substep, U_Kx_half_substep,
-                 U_Ky_half_substep,U_Kx_full_substep, U_Ky_full_substep) = substep
 
-                if substep_number in [2, 3]:
-                    # If it's the q substep, or the p substep after the q
-                    # substep, then we need to update our potential energy
-                    # evolution operator to reflect the current density.
-                    # Otherwise, it is the same as at the end of the last sub-
-                    # step, and we can just re-use it:
+        def dpsi_dt(psi):
+            K_psi = self.compute_K_psi(psi)
+            density[:] = (psi.conj()*self.density_operator*psi).real
+            return -1j/hbar * (K_psi + (self.g * density + V - mu_initial)*psi)
+
+        while t < t_final:
+            if not rk4:
+                for substep_number, substep in enumerate(substeps):
+                    (sub_dt, U_V_half_substep, U_Kx_half_substep,
+                     U_Ky_half_substep,U_Kx_full_substep, U_Ky_full_substep) = substep
+
+                    if substep_number in [2, 3]:
+                        # If it's the q substep, or the p substep after the q
+                        # substep, then we need to update our potential energy
+                        # evolution operator to reflect the current density.
+                        # Otherwise, it is the same as at the end of the last sub-
+                        # step, and we can just re-use it:
+                        if imaginary_time:
+                            U_V_half_substep[:] = np.exp(-1/hbar * (self.g * density + V - mu_initial) * sub_dt / 2)
+                        else:
+                            U_V_half_substep[:] = np.exp(-1j/hbar * (self.g * density + V - mu_initial) * sub_dt / 2)
+
+                    # Evolve for half a substep with potential evolution operator:
+                    psi[:] = U_V_half_substep*psi
+
+                    # Evolution with x kinetic energy evolution operator, using
+                    # odd-even-odd split step method:
+                    do_odd_Kx_evolution()
+                    do_even_Kx_evolution()
+                    do_odd_Kx_evolution()
+
+                    # Evolution with y kinetic energy evolution operator, using
+                    # odd-even-odd split step method:
+                    do_odd_Ky_evolution()
+                    do_even_Ky_evolution()
+                    do_odd_Ky_evolution()
+
+                    # Calculate potential energy evolution operator for half a step
+                    if imaginary_time:
+                        self.normalise(psi, n_initial)
+                    density[:] = (psi.conj()*self.density_operator*psi).real
                     if imaginary_time:
                         U_V_half_substep[:] = np.exp(-1/hbar * (self.g * density + V - mu_initial) * sub_dt / 2)
                     else:
                         U_V_half_substep[:] = np.exp(-1j/hbar * (self.g * density + V - mu_initial) * sub_dt / 2)
 
-                # Evolve for half a substep with potential evolution operator:
-                psi[:] = U_V_half_substep*psi
+                    # Evolve for half a timestep with potential evolution operator:
+                    psi[:] = U_V_half_substep*psi
 
-                # Evolution with x kinetic energy evolution operator, using
-                # odd-even-odd split step method:
-                do_odd_Kx_evolution()
-                do_even_Kx_evolution()
-                do_odd_Kx_evolution()
-
-                # Evolution with y kinetic energy evolution operator, using
-                # odd-even-odd split step method:
-                do_odd_Ky_evolution()
-                do_even_Ky_evolution()
-                do_odd_Ky_evolution()
-
-                # Calculate potential energy evolution operator for half a step
-                if imaginary_time:
-                    self.normalise(psi, n_initial)
-                density[:] = (psi.conj()*self.density_operator*psi).real
-                if imaginary_time:
-                    U_V_half_substep[:] = np.exp(-1/hbar * (self.g * density + V - mu_initial) * sub_dt / 2)
-                else:
-                    U_V_half_substep[:] = np.exp(-1j/hbar * (self.g * density + V - mu_initial) * sub_dt / 2)
-
-                # Evolve for half a timestep with potential evolution operator:
-                psi[:] = U_V_half_substep*psi
-
-                t += sub_dt
+                    t += sub_dt
+            else:
+                k1 = dpsi_dt(psi)
+                k2 = dpsi_dt(psi + k1*dt/2)
+                k3 = dpsi_dt(psi + k2*dt/2)
+                k4 = dpsi_dt(psi + k3*dt)
+                psi[:] += dt/6*(k1 + 2*k2 + 2*k3 + k4)
+                # Ensure endpoints are numerically identical:
+                psi[:-1, :, -1, :] = psi[1:, :, 0, :]
+                psi[-1, :, -1, :] = psi[0, :, 0, :]
+                psi[:, :-1, :, -1] = psi[:, 1:, :, 0]
+                psi[:, -1, :, -1] = psi[:, 0, :, 0] # TODO: MPI this
+                t += dt
             if not i % output_interval:
                 do_output()
             i += 1

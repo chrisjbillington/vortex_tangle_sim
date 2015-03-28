@@ -39,7 +39,7 @@ Nx = 7
 Ny = 7
 
 simulator = BEC2DSimulator(m, g, x_min_global, x_max_global, y_min_global, y_max_global, Nx, Ny,
-                           n_elements_x_global, n_elements_y_global, output_file = 'vortex_test.h5')
+                           n_elements_x_global, n_elements_y_global, output_file = 'vortex_test_rk4.h5')
 x = simulator.x
 y = simulator.y
 
@@ -92,24 +92,31 @@ def run_sims():
     # import lineprofiler
     # lineprofiler.setup(outfile='lineprofile-%d.txt'%MPI_rank)
 
-    psi = simulator.elements.make_vector(initial_guess)
-    simulator.normalise(psi, N_2D)
-    psi = simulator.find_groundstate(psi, V, mu, output_group='initial', output_interval=100, output_callback=plot)
+    # psi = simulator.elements.make_vector(initial_guess)
+    # simulator.normalise(psi, N_2D)
+    # psi = simulator.find_groundstate(psi, V, mu, output_group='initial', output_interval=10, output_callback=plot)
 
-    # Scatter some vortices randomly about.
-    # Ensure all MPI tasks agree on the location of the vortices, by
-    # seeding the pseudorandom number generator with the same seed in
-    # each process:
-    np.random.seed(42)
-    for i in range(30):
-        sign = np.sign(np.random.normal())
-        x_vortex = np.random.normal(0, scale=R)
-        y_vortex = np.random.normal(0, scale=R)
-        psi[:] *= np.exp(sign * 1j*np.arctan2(simulator.y - y_vortex, simulator.x - x_vortex))
-    psi = simulator.evolve(psi, V, t_final=400e-6, output_group='vortices', imaginary_time=True, output_callback=plot)
+    # # Scatter some vortices randomly about.
+    # # Ensure all MPI tasks agree on the location of the vortices, by
+    # # seeding the pseudorandom number generator with the same seed in
+    # # each process:
+    # np.random.seed(42)
+    # for i in range(30):
+    #     sign = np.sign(np.random.normal())
+    #     x_vortex = np.random.normal(0, scale=R)
+    #     y_vortex = np.random.normal(0, scale=R)
+    #     psi[:] *= np.exp(sign * 1j*np.arctan2(simulator.y - y_vortex, simulator.x - x_vortex))
+    # psi = simulator.evolve(psi, V, t_final=400e-6, output_group='vortices', imaginary_time=True, output_callback=plot)
+
+    import h5py
+    with h5py.File('vortex_test_rk4.h5','r') as f:
+        psi = f['output/time evolution/psi'][-50]
+        t_initial = f['output/time evolution/output_log']['time'][-50]
     # Evolve in time:
-    psi = simulator.evolve(psi, V, t_final=np.inf, output_group='time evolution',
-                           output_callback=plot, output_interval=10)
+    global n_initial
+    n_initial = simulator.compute_number(psi)
+    psi = simulator.evolve(psi, V, t_initial=t_initial, t_final=np.inf, output_group='time evolution',
+                           output_callback=plot, output_interval=100, rk4=True, timestep_factor=1/pi)
 
 if not SHOW_PLOT:
     run_sims()
