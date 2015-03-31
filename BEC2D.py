@@ -180,72 +180,51 @@ class BEC2DSimulator(object):
 
         # The data we want to send to adjacent processes isn't in contiguous
         # memory, so we need to copy it into and out of temporary buffers:
+        self.MPI_left_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
+        self.MPI_left_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
+        self.MPI_right_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
+        self.MPI_right_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
+        self.MPI_up_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_up_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_down_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_down_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
 
-        # Buffers for operating on psi with operators that are non-diagonal in
-        # the spatial basis, requiring summing contributions from adjacent
-        # elements:
-        self.MPI_left_nondiags_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
-        self.MPI_left_nondiags_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
-        self.MPI_right_nondiags_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
-        self.MPI_right_nondiags_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
-        self.MPI_up_nondiags_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
-        self.MPI_up_nondiags_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
-        self.MPI_down_nondiags_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
-        self.MPI_down_nondiags_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
-
-        # Buffers for sending values of psi to adjacent processes. Values are
-        # supposed to be identical on edges of adjacent elements, but due to
-        # rounding error they may not stay perfectly identical. This can be a
-        # problem, so we send the values across from one to the other once a
-        # timestep to keep them agreeing.
-        self.MPI_left_values_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
-        self.MPI_right_values_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
-        self.MPI_down_values_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
-        self.MPI_up_values_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
-
-        # We need to tag our data to have a way other than rank to distinguish
-        # between multiple messages the two tasks might be sending each other
-        # at the same time:
-        TAG_LEFT_TO_RIGHT_NONDIAGS = 0
-        TAG_RIGHT_TO_LEFT_NONDIAGS = 1
-        TAG_DOWN_TO_UP_NONDIAGS = 2
-        TAG_UP_TO_DOWN_NONDIAGS = 3
-        TAG_RIGHT_TO_LEFT_VALUES = 4
-        TAG_UP_TO_DOWN_VALUES = 5
+        # We need to tag our data in case there are exactly two MPI tasks in a
+        # direction, in which case we need a way other than rank to
+        # distinguish between the two messages the two tasks might be sending
+        # each other at one time:
+        TAG_LEFT_TO_RIGHT = 0
+        TAG_RIGHT_TO_LEFT = 1
+        TAG_DOWN_TO_UP = 2
+        TAG_UP_TO_DOWN = 3
 
         # Create persistent requests for the data transfers we will regularly be doing:
-        self.MPI_send_nondiags_left = self.MPI_comm.Send_init(self.MPI_left_nondiags_send_buffer,
-                                                              self.MPI_rank_left, tag=TAG_RIGHT_TO_LEFT_NONDIAGS)
-        self.MPI_send_nondiags_right = self.MPI_comm.Send_init(self.MPI_right_nondiags_send_buffer,
-                                                               self.MPI_rank_right, tag=TAG_LEFT_TO_RIGHT_NONDIAGS)
-        self.MPI_receive_nondiags_left = self.MPI_comm.Recv_init(self.MPI_left_nondiags_receive_buffer,
-                                                                 self.MPI_rank_left, tag=TAG_LEFT_TO_RIGHT_NONDIAGS)
-        self.MPI_receive_nondiags_right = self.MPI_comm.Recv_init(self.MPI_right_nondiags_receive_buffer,
-                                                                  self.MPI_rank_right, tag=TAG_RIGHT_TO_LEFT_NONDIAGS)
-        self.MPI_send_nondiags_down = self.MPI_comm.Send_init(self.MPI_down_nondiags_send_buffer,
-                                                              self.MPI_rank_down, tag=TAG_UP_TO_DOWN_NONDIAGS)
-        self.MPI_send_nondiags_up = self.MPI_comm.Send_init(self.MPI_up_nondiags_send_buffer,
-                                                            self.MPI_rank_up, tag=TAG_DOWN_TO_UP_NONDIAGS)
-        self.MPI_receive_nondiags_down = self.MPI_comm.Recv_init(self.MPI_down_nondiags_receive_buffer,
-                                                                 self.MPI_rank_down, tag=TAG_DOWN_TO_UP_NONDIAGS)
-        self.MPI_receive_nondiags_up = self.MPI_comm.Recv_init(self.MPI_up_nondiags_receive_buffer,
-                                                               self.MPI_rank_up, tag=TAG_UP_TO_DOWN_NONDIAGS)
-        self.MPI_send_values_left = self.MPI_comm.Send_init(self.MPI_left_values_send_buffer,
-                                                            self.MPI_rank_left, tag=TAG_RIGHT_TO_LEFT_VALUES)
-        self.MPI_receive_values_right = self.MPI_comm.Recv_init(self.MPI_right_values_receive_buffer,
-                                                                self.MPI_rank_right, tag=TAG_RIGHT_TO_LEFT_VALUES)
-        self.MPI_send_values_down = self.MPI_comm.Send_init(self.MPI_down_values_send_buffer,
-                                                            self.MPI_rank_down, tag=TAG_UP_TO_DOWN_VALUES)
-        self.MPI_receive_values_up = self.MPI_comm.Recv_init(self.MPI_up_values_receive_buffer,
-                                                             self.MPI_rank_up, tag=TAG_UP_TO_DOWN_VALUES)
+        self.MPI_send_left = self.MPI_comm.Send_init(self.MPI_left_send_buffer,
+                                                     self.MPI_rank_left, tag=TAG_RIGHT_TO_LEFT)
+        self.MPI_send_right = self.MPI_comm.Send_init(self.MPI_right_send_buffer,
+                                                      self.MPI_rank_right, tag=TAG_LEFT_TO_RIGHT)
+        self.MPI_receive_left = self.MPI_comm.Recv_init(self.MPI_left_receive_buffer,
+                                                        self.MPI_rank_left, tag=TAG_LEFT_TO_RIGHT)
+        self.MPI_receive_right = self.MPI_comm.Recv_init(self.MPI_right_receive_buffer,
+                                                         self.MPI_rank_right, tag=TAG_RIGHT_TO_LEFT)
+        self.MPI_send_down = self.MPI_comm.Send_init(self.MPI_down_send_buffer,
+                                                     self.MPI_rank_down, tag=TAG_UP_TO_DOWN)
+        self.MPI_send_up = self.MPI_comm.Send_init(self.MPI_up_send_buffer,
+                                                      self.MPI_rank_up, tag=TAG_DOWN_TO_UP)
+        self.MPI_receive_down = self.MPI_comm.Recv_init(self.MPI_down_receive_buffer,
+                                                        self.MPI_rank_down, tag=TAG_DOWN_TO_UP)
+        self.MPI_receive_up = self.MPI_comm.Recv_init(self.MPI_up_receive_buffer,
+                                                         self.MPI_rank_up, tag=TAG_UP_TO_DOWN)
 
-        self.MPI_nondiags_requests = [self.MPI_send_nondiags_left, self.MPI_receive_nondiags_left,
-                                     self.MPI_send_nondiags_right, self.MPI_receive_nondiags_right,
-                                     self.MPI_send_nondiags_down, self.MPI_receive_nondiags_down,
-                                     self.MPI_send_nondiags_up, self.MPI_receive_nondiags_up]
+        self.MPI_all_requests = [self.MPI_send_left, self.MPI_receive_left,
+                                 self.MPI_send_right, self.MPI_receive_right,
+                                 self.MPI_send_down, self.MPI_receive_down,
+                                 self.MPI_send_up, self.MPI_receive_up]
 
-        self.MPI_values_requests = [self.MPI_send_values_left, self.MPI_receive_values_right,
-                                    self.MPI_send_values_down, self.MPI_receive_values_up]
+        self.MPI_left_to_right_requests = [self.MPI_send_right, self.MPI_receive_left]
+        self.MPI_right_to_left_requests = [self.MPI_send_left, self.MPI_receive_right]
+        self.MPI_down_to_up_requests = [self.MPI_send_up, self.MPI_receive_down]
+        self.MPI_up_to_down_requests = [self.MPI_send_down, self.MPI_receive_up]
 
     def global_dot(self, vec1, vec2):
         """"Dots two vectors and sums result over MPI processes"""
@@ -583,7 +562,7 @@ class BEC2DSimulator(object):
                output_group=None, output_interval=100, output_callback=None, rk4=False):
         dx_min = np.diff(self.x[0, 0, :, 0]).min()
         dy_min = np.diff(self.y[0, 0, 0, :]).min()
-        dt = timestep_factor * min(dx_min, dy_min)**2 * self.m / (2 * pi * hbar)
+        dt = timestep_factor * min(dx_min, dy_min)**2 * self.m / (2 * hbar)
 
         if not self.MPI_rank: # Only one process prints to stdout:
             print('\n==========')
