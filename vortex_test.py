@@ -6,9 +6,7 @@ import numpy as np
 from PyQt4 import QtCore, QtGui
 from qtutils import inthread, inmain_decorator
 
-import matplotlib
-
-from BEC2D import BEC2DSimulator
+from BEC2D import Simulator2D
 
 # Constants:
 pi = np.pi
@@ -38,13 +36,32 @@ n_elements_y_global = 32
 Nx = 7
 Ny = 7
 
-simulator = BEC2DSimulator(m, g, x_min_global, x_max_global, y_min_global, y_max_global, Nx, Ny,
+simulator = Simulator2D(m, g, x_min_global, x_max_global, y_min_global, y_max_global, Nx, Ny,
                            n_elements_x_global, n_elements_y_global, output_file = 'vortex_test_rk4.h5')
 x = simulator.x
 y = simulator.y
 
-# The Harmonic trap at our gridpoints, (n_elements x N):
+# Kinetic energy operators:
+Kx = -hbar**2/(2*m) * simulator.grad2x
+Ky = -hbar**2/(2*m) * simulator.grad2y
+
+# The Harmonic trap at our gridpoints, (n_elements_x, n_elements_y, Nx, Ny):
 V = 0.5*m*omega**2*(x**2 + y**2)
+
+def H(t, psi, x_elements, y_elements, x_points, y_points):
+    Kx = -hbar**2/(2*m) * simulator.grad2x[x_points, :]
+    Ky = -hbar**2/(2*m) * simulator.grad2y[y_points, :]
+    U = V[x_elements, y_elements, x_points, y_points]
+    U_nonlinear = g * simulator.density_operator[x_points, y_points]
+    return Kx, Ky, U, U_nonlinear
+
+def K_diags(x, y):
+    """Return the diagonals of the nondiagonal part of the Hamiltonian. Must
+    have the same dimensionality as psi, so we add dimensions of size one for
+    n_elements_x and n_elements_y. If we had rotation terms or something then
+    our returned array would actually vary over those dimensions."""
+    return (Kx.diagonal()[np.newaxis, np.newaxis, :, np.newaxis] +
+            Ky.diagonal()[np.newaxis, np.newaxis, np.newaxis, :])
 
 @inmain_decorator()
 def plot(psi, output_log):
@@ -67,7 +84,7 @@ def plot(psi, output_log):
         image_item.updateImage(rgb)
 
 SHOW_PLOT = True
-# SHOW_PLOT = False
+SHOW_PLOT = False
 if not os.getenv('DISPLAY'):
     # But not if there is no x server:
     SHOW_PLOT = False
@@ -92,9 +109,9 @@ def run_sims():
     # import lineprofiler
     # lineprofiler.setup(outfile='lineprofile-%d.txt'%MPI_rank)
 
-    # psi = simulator.elements.make_vector(initial_guess)
-    # simulator.normalise(psi, N_2D)
-    # psi = simulator.find_groundstate(psi, V, mu, output_group='initial', output_interval=10, output_callback=plot)
+    psi = simulator.elements.make_vector(initial_guess)
+    simulator.normalise(psi, N_2D)
+    psi = simulator.find_groundstate(psi, H, V, mu, output_group='initial', output_interval=10, output_callback=plot)
 
     # # Scatter some vortices randomly about.
     # # Ensure all MPI tasks agree on the location of the vortices, by
@@ -108,15 +125,15 @@ def run_sims():
     #     psi[:] *= np.exp(sign * 1j*np.arctan2(simulator.y - y_vortex, simulator.x - x_vortex))
     # psi = simulator.evolve(psi, V, t_final=400e-6, output_group='vortices', imaginary_time=True, output_callback=plot)
 
-    import h5py
-    with h5py.File('vortex_test_rk4.h5','r') as f:
-        psi = f['output/time evolution/psi'][-50]
-        t_initial = f['output/time evolution/output_log']['time'][-50]
-    # Evolve in time:
-    global n_initial
-    n_initial = simulator.compute_number(psi)
-    psi = simulator.evolve(psi, V, t_initial=t_initial, t_final=np.inf, output_group='time evolution',
-                           output_callback=plot, output_interval=100, rk4=True, timestep_factor=1/pi)
+    # import h5py
+    # with h5py.File('vortex_test_rk4.h5','r') as f:
+    #     psi = f['output/time evolution/psi'][-50]
+    #     t_initial = f['output/time evolution/output_log']['time'][-50]
+    # # Evolve in time:
+    # global n_initial
+    # n_initial = simulator.compute_number(psi)
+    # psi = simulator.evolve(psi, V, t_initial=t_initial, t_final=np.inf, output_group='time evolution',
+    #                        output_callback=plot, output_interval=100, rk4=True, timestep_factor=1/pi)
 
 if not SHOW_PLOT:
     run_sims()
