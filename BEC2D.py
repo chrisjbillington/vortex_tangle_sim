@@ -5,15 +5,50 @@ import time
 import traceback
 
 import numpy as np
-from scipy.linalg import expm
 from mpi4py import MPI
 import h5py
 
 from FEDVR import FiniteElements2D
 
-hbar = 1.054571726e-34
-pi = np.pi
+def show_slices(slices, shape, show=False):
+    """Function that shows what points are selected by a particular slice
+    operation"""
+    import pylab as pl
+    from matplotlib import ticker
+    pl.figure()
+    n_elements_x, n_elements_y, Nx, Ny = shape
+    psi = np.zeros(shape)
+    psi[slices] = 1
+    psi = psi.transpose(0, 2, 1, 3).reshape((n_elements_x * Nx, n_elements_y * Ny))
+    pl.imshow(psi.transpose(), origin='lower', interpolation='nearest', cmap='gray_r')
+    locx = ticker.IndexLocator(base=Nx, offset=0)
+    locy = ticker.IndexLocator(base=Ny, offset=0)
+    ax = pl.gca()
+    ax.xaxis.set_minor_locator(locx)
+    ax.yaxis.set_minor_locator(locy)
+    ax.grid(which='minor', axis='both', linestyle='-')
+    if show:
+        pl.show()
 
+# Some slice objects for conveniently slicing axes in multidimensional arrays:
+FIRST = np.s_[:1]
+LAST = np.s_[-1:]
+ALL = np.s_[:]
+INTERIOR = np.s_[1:-1]
+ALL_BUT_FIRST = np.s_[1:]
+ALL_BUT_LAST = np.s_[:-1]
+
+# Each of the following is (x_elements, y_elements, x_points, y_points)
+LEFT_BOUNDARY = (FIRST, ALL, FIRST, ALL) # The points on the left edge of the left boundary element
+RIGHT_BOUNDARY = (LAST, ALL, LAST, ALL) # The points on the right edge of the right boundary element
+BOTTOM_BOUNDARY = (ALL, FIRST, ALL, FIRST) # The points on the bottom edge of the bottom boundary element
+TOP_BOUNDARY = (ALL, LAST, ALL, LAST) # The points on the top edge of the top boundary element
+INTERIOR_ELEMENTS = (INTERIOR, INTERIOR, ALL, ALL) # All points in all elements that are not boundary elements
+INTERIOR_POINTS = (ALL, ALL, INTERIOR, INTERIOR) # Points that are not edgepoints in all elements
+LEFT_INTERIOR_EDGEPOINTS = (ALL_BUT_FIRST, ALL, FIRST, ALL) # All points on the left edge of a non-border element
+RIGHT_INTERIOR_EDGEPOINTS = (ALL_BUT_LAST, ALL, LAST, ALL) # All points on the right edge of a non-border element
+BOTTOM_INTERIOR_EDGEPOINTS = (ALL, ALL_BUT_FIRST, ALL, FIRST) # All points on the bottom edge of a non-border element
+TOP_INTERIOR_EDGEPOINTS = (ALL, ALL_BUT_LAST, ALL, LAST) # All points on the top edge of a non-border element
 
 def get_factors(n):
     """return all the factors of n"""
@@ -39,12 +74,12 @@ def get_best_2D_segmentation(size_x, size_y, N_segments):
     return best_n_segments_x, best_n_segments_y
 
 
-class BEC2DSimulator(object):
-    def __init__(self, m, g, x_min_global, x_max_global, y_min_global, y_max_global, Nx, Ny,
-                 n_elements_x_global, n_elements_y_global, output_file=None):
-        """A class for simulating the Gross-Pitaevskii equation in 2D with the
-        finite element discrete variable representation, on multiple cores if
-        using MPI"""
+class Simulator2D(object):
+    def __init__(self, x_min_global, x_max_global, y_min_global, y_max_global, Nx, Ny,
+                 n_elements_x_global, n_elements_y_global, output_file=None, resume=True, natural_units=False):
+        """A class for simulating a the nonlinear Schrodinger equation in two
+        spatial dimensions with the finite element discrete variable
+        representation, on multiple cores if using MPI"""
         if (n_elements_x_global % 2):
             raise ValueError("Odd-even split step method requires even n_elements_x_global")
         if (n_elements_y_global % 2):
@@ -53,16 +88,14 @@ class BEC2DSimulator(object):
         self.x_max_global = x_max_global
         self.y_min_global = y_min_global
         self.y_max_global = y_max_global
+        self.Nx = Nx
+        self.Ny = Ny
         self.n_elements_x_global = n_elements_x_global
         self.n_elements_y_global = n_elements_y_global
         self.output_file = output_file
-        self.Nx = Nx
-        self.Ny = Ny
-        self.m = m
-        self.g = g
+        self.resume = resume
         self.element_width_x = (self.x_max_global - self.x_min_global)/self.n_elements_x_global
         self.element_width_y = (self.y_max_global - self.y_min_global)/self.n_elements_y_global
-
         self._setup_MPI_grid()
 
         self.elements = FiniteElements2D(Nx, Ny, self.n_elements_x, self.n_elements_y,
@@ -71,11 +104,12 @@ class BEC2DSimulator(object):
         self.shape = self.elements.shape
         self.global_shape = (self.n_elements_x_global, self.n_elements_y_global, self.Nx, self.Ny)
 
-        # Second derivative operators, each (N, N):
+        # Derivative operators, each (N, N):
+        self.gradx, self.grady = self.elements.derivative_operators()
         self.grad2x, self.grad2y = self.elements.second_derivative_operators()
 
-        # Density operator. Is diagonal and so is represented as an (Nx, Ny) array
-        # containing its diagonals:
+        # Density operator. Is diagonal and so is represented as an (Nx, Ny)
+        # array containing its diagonals:
         self.density_operator = self.elements.density_operator()
 
         # The x spatial points of the DVR basis functions, an (n_elements_x, 1, Nx, 1) array:
@@ -83,11 +117,12 @@ class BEC2DSimulator(object):
         # The y spatial points of the DVR basis functions, an (1, n_elements_y, 1, Ny) array:
         self.y = self.elements.points_Y
 
-        # Kinetic energy operators:
-        self.Kx = -hbar**2 / (2 * self.m) * self.grad2x
-        self.Ky = -hbar**2 / (2 * self.m) * self.grad2y
+        if natural_units:
+            self.hbar = 1
+        else:
+            self.hbar = 1.054571726e-34
 
-        if self.output_file is not None and not os.path.exists(self.output_file):
+        if self.output_file is not None and not (os.path.exists(self.output_file) and self.resume):
             with h5py.File(self.output_file, 'w', driver='mpio', comm=MPI.COMM_WORLD) as f:
                 f.attrs['x_min_global'] = x_min_global
                 f.attrs['x_max_global'] = x_max_global
@@ -99,8 +134,6 @@ class BEC2DSimulator(object):
                 f.attrs['n_elements_y_global'] = self.n_elements_y_global
                 f.attrs['Nx'] = Nx
                 f.attrs['Ny'] = Ny
-                f.attrs['m'] = m
-                f.attrs['g'] = g
                 f.attrs['global_shape'] = (self.n_elements_x_global, self.n_elements_y_global, Nx, Ny)
                 geometry_dtype = [('rank', int),
                                   ('processor_name', 'a256'),
@@ -122,6 +155,32 @@ class BEC2DSimulator(object):
         # A dictionary for keeping track of what row we're up to in file
         # output in each group:
         self.output_row = {}
+
+        # Slices for convenient indexing:
+        EDGE_POINTS_X = np.s_[::self.Nx-1]
+        EDGE_POINTS_Y = np.s_[::self.Nx-1]
+        BOUNDARY_ELEMENTS_X = np.s_[::self.n_elements_x-1]
+        BOUNDARY_ELEMENTS_Y = np.s_[::self.n_elements_x-1]
+
+        # These are for indexing all edges of all boundary elements. The below
+        # four sets of slices used in succession cover the edges of boundary
+        # elements exactly once without doubling up on corner points:
+        self.BOUNDARY_ELEMENTS_X_EDGE_POINTS_X = (BOUNDARY_ELEMENTS_X, ALL, EDGE_POINTS_X, ALL)
+        self.BOUNDARY_ELEMENTS_Y_EDGE_POINTS_X = (INTERIOR, BOUNDARY_ELEMENTS_Y, EDGE_POINTS_X, ALL)
+        self.BOUNDARY_ELEMENTS_X_EDGE_POINTS_Y = (BOUNDARY_ELEMENTS_X, ALL, INTERIOR, EDGE_POINTS_Y)
+        self.BOUNDARY_ELEMENTS_Y_EDGE_POINTS_Y = (INTERIOR, BOUNDARY_ELEMENTS_Y, INTERIOR, EDGE_POINTS_Y)
+
+        # These are for indexing all edges of non-boundary elements. Used in
+        # succession they cover the edges of these elements exactly once
+        # without doubling up on corner points.
+        self.INTERIOR_ELEMENTS_EDGE_POINTS_X = (INTERIOR, INTERIOR, EDGE_POINTS_X, ALL)
+        self.INTERIOR_ELEMENTS_EDGE_POINTS_Y = (INTERIOR, INTERIOR, INTERIOR, EDGE_POINTS_Y)
+
+        # These are for indexing all points of border elements. Used in
+        # succession they cover the edges of these elements exactly once
+        # without doubling up on corner elements.
+        self.BOUNDARY_ELEMENTS_X_ALL_POINTS = (BOUNDARY_ELEMENTS_X, ALL, ALL, ALL)
+        self.BOUNDARY_ELEMENTS_Y_ALL_POINTS = (INTERIOR, BOUNDARY_ELEMENTS_Y, ALL, ALL)
 
     def _setup_MPI_grid(self):
         """Split space up according to the number of MPI tasks. Set instance
@@ -188,10 +247,10 @@ class BEC2DSimulator(object):
         self.MPI_left_nondiags_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
         self.MPI_right_nondiags_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
         self.MPI_right_nondiags_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
-        self.MPI_up_nondiags_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
-        self.MPI_up_nondiags_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
-        self.MPI_down_nondiags_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
-        self.MPI_down_nondiags_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_top_nondiags_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_top_nondiags_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_bottom_nondiags_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_bottom_nondiags_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
 
         # Buffers for sending values of psi to adjacent processes. Values are
         # supposed to be identical on edges of adjacent elements, but due to
@@ -200,8 +259,8 @@ class BEC2DSimulator(object):
         # timestep to keep them agreeing.
         self.MPI_left_values_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
         self.MPI_right_values_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
-        self.MPI_down_values_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
-        self.MPI_up_values_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_bottom_values_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_top_values_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
 
         # We need to tag our data to have a way other than rank to distinguish
         # between multiple messages the two tasks might be sending each other
@@ -222,21 +281,21 @@ class BEC2DSimulator(object):
                                                                  self.MPI_rank_left, tag=TAG_LEFT_TO_RIGHT_NONDIAGS)
         self.MPI_receive_nondiags_right = self.MPI_comm.Recv_init(self.MPI_right_nondiags_receive_buffer,
                                                                   self.MPI_rank_right, tag=TAG_RIGHT_TO_LEFT_NONDIAGS)
-        self.MPI_send_nondiags_down = self.MPI_comm.Send_init(self.MPI_down_nondiags_send_buffer,
+        self.MPI_send_nondiags_down = self.MPI_comm.Send_init(self.MPI_bottom_nondiags_send_buffer,
                                                               self.MPI_rank_down, tag=TAG_UP_TO_DOWN_NONDIAGS)
-        self.MPI_send_nondiags_up = self.MPI_comm.Send_init(self.MPI_up_nondiags_send_buffer,
+        self.MPI_send_nondiags_up = self.MPI_comm.Send_init(self.MPI_top_nondiags_send_buffer,
                                                             self.MPI_rank_up, tag=TAG_DOWN_TO_UP_NONDIAGS)
-        self.MPI_receive_nondiags_down = self.MPI_comm.Recv_init(self.MPI_down_nondiags_receive_buffer,
+        self.MPI_receive_nondiags_down = self.MPI_comm.Recv_init(self.MPI_bottom_nondiags_receive_buffer,
                                                                  self.MPI_rank_down, tag=TAG_DOWN_TO_UP_NONDIAGS)
-        self.MPI_receive_nondiags_up = self.MPI_comm.Recv_init(self.MPI_up_nondiags_receive_buffer,
+        self.MPI_receive_nondiags_up = self.MPI_comm.Recv_init(self.MPI_top_nondiags_receive_buffer,
                                                                self.MPI_rank_up, tag=TAG_UP_TO_DOWN_NONDIAGS)
         self.MPI_send_values_left = self.MPI_comm.Send_init(self.MPI_left_values_send_buffer,
                                                             self.MPI_rank_left, tag=TAG_RIGHT_TO_LEFT_VALUES)
         self.MPI_receive_values_right = self.MPI_comm.Recv_init(self.MPI_right_values_receive_buffer,
                                                                 self.MPI_rank_right, tag=TAG_RIGHT_TO_LEFT_VALUES)
-        self.MPI_send_values_down = self.MPI_comm.Send_init(self.MPI_down_values_send_buffer,
+        self.MPI_send_values_down = self.MPI_comm.Send_init(self.MPI_bottom_values_send_buffer,
                                                             self.MPI_rank_down, tag=TAG_UP_TO_DOWN_VALUES)
-        self.MPI_receive_values_up = self.MPI_comm.Recv_init(self.MPI_up_values_receive_buffer,
+        self.MPI_receive_values_up = self.MPI_comm.Recv_init(self.MPI_top_values_receive_buffer,
                                                              self.MPI_rank_up, tag=TAG_UP_TO_DOWN_VALUES)
 
         self.MPI_nondiags_requests = [self.MPI_send_nondiags_left, self.MPI_receive_nondiags_left,
@@ -246,6 +305,34 @@ class BEC2DSimulator(object):
 
         self.MPI_values_requests = [self.MPI_send_values_left, self.MPI_receive_values_right,
                                     self.MPI_send_values_down, self.MPI_receive_values_up]
+
+    def MPI_send_border_nondiags(self, H_nondiag_psi):
+        """Start an asynchronous MPI send to all adjacent MPI processes,
+        sending them the values of H_nondiag_psi on the borders"""
+        self.MPI_left_nondiags_send_buffer[:] = H_nondiag_psi[LEFT_BOUNDARY].reshape(self.n_elements_y * self.Ny)
+        self.MPI_right_nondiags_send_buffer[:] = H_nondiag_psi[RIGHT_BOUNDARY].reshape(self.n_elements_y * self.Ny)
+        self.MPI_bottom_nondiags_send_buffer[:] = H_nondiag_psi[BOTTOM_BOUNDARY].reshape(self.n_elements_x * self.Nx)
+        self.MPI_top_nondiags_send_buffer[:] = H_nondiag_psi[TOP_BOUNDARY].reshape(self.n_elements_x * self.Nx)
+        MPI.Prequest.Startall(self.MPI_nondiags_requests)
+
+    def MPI_receive_border_nondiags(self, H_nondiag_psi):
+        MPI.Prequest.Waitall(self.MPI_nondiags_requests)
+        left_data = self.MPI_left_nondiags_receive_buffer.reshape((1, self.n_elements_y, 1, self.Ny))
+        right_data = self.MPI_right_nondiags_receive_buffer.reshape((1, self.n_elements_y, 1, self.Ny))
+        bottom_data = self.MPI_bottom_nondiags_receive_buffer.reshape((self.n_elements_x, 1, self.Nx, 1))
+        top_data = self.MPI_top_nondiags_receive_buffer.reshape((self.n_elements_x, 1, self.Nx, 1))
+        if H_nondiag_psi.dtype == np.float:
+            # MPI buffers are complex, but the data might be real (in the case
+            # that SOR is being done with a real trial wavefunction), and we
+            # don't want to emit a casting warning:
+            left_data = left_data.real
+            right_data = right_data.real
+            bottom_data = bottom_data.real
+            top_data = top_data.real
+        H_nondiag_psi[LEFT_BOUNDARY] += left_data
+        H_nondiag_psi[RIGHT_BOUNDARY] += right_data
+        H_nondiag_psi[BOTTOM_BOUNDARY] += bottom_data
+        H_nondiag_psi[TOP_BOUNDARY] += top_data
 
     def global_dot(self, vec1, vec2):
         """"Dots two vectors and sums result over MPI processes"""
@@ -266,79 +353,82 @@ class BEC2DSimulator(object):
         ncalc = self.global_dot(psi, psi)
         psi[:] *= np.sqrt(N_2D/ncalc)
 
-    def compute_K_psi(self, psi):
-        """Operate on psi with the total kinetic energy operator and return
-        the result."""
+    def compute_H_psi(self, t, psi, H, boundary_element_slices=None, internal_element_slices=None, outarrays=None):
+        """Applies the Hamiltonian to psi with H_psi, sums the nondiagonal
+        contributions at element edges and MPI task borders, and returns the
+        resulting three terms H_nondiag_psi, H_diag_psi, nonlinear_psi. We
+        don't sum them together here because the caller may with to treat them
+        separately in an energy calculation, such as dividing the nonlinear
+        term by two before summing up the total energy.
 
-        # Compute Kx_psi and Ky_psi at the border elements first, before
-        # firing off data to other MPI tasks. Then compute Kx_psi and Ky_psi
-        # on the internal elements, before adding in the contributions from
-        # adjacent processes at the last moment. This lets us cater to as much
-        # latency in transport as possible.
+        boundary_element_slices and internal_element slices can be provided to
+        specify which points should be evaluated. If both are None, all points
+        will be evaluated. Behaviour unspecified if only one is None."""
 
-        Kx_psi = np.empty(psi.shape, dtype=psi.dtype)
-        Ky_psi = np.empty(psi.shape, dtype=psi.dtype)
+        # optimisation, don't create arrays if the user has provided them:
+        if outarrays is None:
+            K_psi = np.empty(psi.shape, dtype=psi.dtype)
+            U = np.empty(psi.shape, dtype=psi.dtype)
+            U_nonlinear = np.empty(psi.shape, dtype=psi.dtype)
+        else:
+            K_psi, U, U_nonlinear = outarrays
 
-        # Evaluating Kx_psi and Ky_psi on the border elements first:
-        Kx_psi[(0, -1), :, :, :] = np.einsum('ij,xyjl->xyil', self.Kx,  psi[(0, -1), :, :, :])
-        Ky_psi[:, (0, -1), :, :] = np.einsum('kl,xyjl->xyjk', self.Ky,  psi[:, (0, -1), :, :])
+        # Compute H_psi at the boundary elements first, before firing off data
+        # to other MPI tasks. Then compute H_psi on the internal elements,
+        # before adding in the contributions from adjacent processes at the
+        # last moment. This lets us cater to as much latency in transport as
+        # possible. If the caller has provided boundary_element_slices and
+        # internal_element_slices, then don't evaluate all all the points, just at the
+        # ones requested. Basically pre_MPI_slices must contain any boundary
+        # points that the caller requires, and for maximum efficiency should
+        # contain as few as possible other points - they should be be in
+        # post_MPI_slices and be evaluated after the MPI send has been done.
 
-        # Send values on the border to adjacent MPI tasks:
-        self.MPI_left_send_buffer[:] = Kx_psi[0, :, 0, :].reshape(self.n_elements_y * self.Ny)
-        self.MPI_right_send_buffer[:] = Kx_psi[-1, :, -1, :].reshape(self.n_elements_y * self.Ny)
-        self.MPI_down_send_buffer[:] = Ky_psi[:, 0, :, 0].reshape(self.n_elements_x * self.Nx)
-        self.MPI_up_send_buffer[:] = Ky_psi[:, -1, :, -1].reshape(self.n_elements_x * self.Nx)
-        MPI.Prequest.Startall(self.MPI_all_requests)
+        if boundary_element_slices is internal_element_slices is None:
+            boundary_element_slices = (self.BOUNDARY_ELEMENTS_X_ALL_POINTS, self.BOUNDARY_ELEMENTS_Y_ALL_POINTS)
+            internal_element_slices = (INTERIOR_ELEMENTS,)
 
-        # Evaluating Kx_psi and Ky_psi at all internal elements:
-        Kx_psi[1:-1, :, :, :] = np.einsum('ij,xyjl->xyil', self.Kx,  psi[1:-1, :, :, :])
-        Ky_psi[:, 1:-1, :, :] = np.einsum('kl,xyjl->xyjk', self.Ky,  psi[:, 1:-1, :, :])
+        # Evaluate H_psi at the boundary elements, if there are any:
+        for slices in boundary_element_slices:
+            K_psi[slices], U[slices], U_nonlinear[slices] = H(t, psi, *slices)
 
-        # Add contributions to x and y kinetic energy from both elements adjacent to each internal edge:
-        Kx_psi[1:, :, 0, :] = Kx_psi[:-1, :, -1, :] = Kx_psi[1:, :, 0, :] + Kx_psi[:-1, :, -1, :]
-        Ky_psi[:, 1:, :, 0] = Ky_psi[:, :-1, :, -1] = Ky_psi[:, 1:, :, 0] + Ky_psi[:, :-1, :, -1]
+        # Send values on the boundary to adjacent MPI tasks:
+        self.MPI_send_border_nondiags(K_psi)
 
-        # Add contributions to x and y kinetic energy from adjacent MPI tasks:
-        MPI.Prequest.Waitall(self.MPI_all_requests)
-        left_data = self.MPI_left_receive_buffer.reshape((self.n_elements_y, self.Ny))
-        right_data = self.MPI_right_receive_buffer.reshape((self.n_elements_y, self.Ny))
-        down_data = self.MPI_down_receive_buffer.reshape((self.n_elements_x, self.Nx))
-        up_data = self.MPI_up_receive_buffer.reshape((self.n_elements_x, self.Nx))
+        # Now evaluate H_psi at all internal elements:
+        for slices in internal_element_slices:
+            K_psi[slices], U[slices], U_nonlinear[slices] = H(t, psi, *slices)
 
-        if psi.dtype == np.float:
-            # MPI buffers are complex, but the data might be real (in the case
-            # that SOR is being done with a real trial wavefunction), and we
-            # don't want to emit a casting warning:
-            left_data = left_data.real
-            right_data = right_data.real
-            down_data = down_data.real
-            up_data = up_data.real
-        Kx_psi[0, :, 0, :] += left_data
-        Kx_psi[-1, :, -1, :] += right_data
-        Ky_psi[:, 0, :, 0] += down_data
-        Ky_psi[:, -1, :, -1] += up_data
+        # Add contributions to K_psi at edges shared by interior elements.
+        # Important that we apply sum in one direction before computing the
+        # sum in the other direction, otherwise we will overwrite values that
+        # should have been included in the total sum.
+        total_at_x_edges = K_psi[LEFT_INTERIOR_EDGEPOINTS] + K_psi[RIGHT_INTERIOR_EDGEPOINTS]
+        K_psi[LEFT_INTERIOR_EDGEPOINTS] = K_psi[RIGHT_INTERIOR_EDGEPOINTS] = total_at_x_edges
+        total_at_y_edges = K_psi[BOTTOM_INTERIOR_EDGEPOINTS] + K_psi[TOP_INTERIOR_EDGEPOINTS]
+        K_psi[BOTTOM_INTERIOR_EDGEPOINTS] = K_psi[TOP_INTERIOR_EDGEPOINTS] = total_at_y_edges
 
-        return Kx_psi + Ky_psi
+        # Add contributions to H_nondiag_psi from adjacent MPI tasks:
+        self.MPI_receive_border_nondiags(K_psi)
 
-    def compute_mu(self, psi, V, uncertainty=False):
+        return K_psi, U, U_nonlinear
+
+    def compute_mu(self, t, psi, H, uncertainty=False):
         """Calculate chemical potential of DVR basis wavefunction psi with
-        potential V (same shape as psi), and optionally its uncertainty."""
+        Hamiltonian applied by H_psi. Optionally return its uncertainty."""
 
-        # Total kinetic energy operator operating on psi:
-        K_psi = self.compute_K_psi(psi)
+        # Total Hamiltonian operator operating on psi:
+        K_psi, U, U_nonlinear = self.compute_H_psi(t, psi, H)
+        total_H_psi = K_psi + (U + U_nonlinear)*psi
 
         # Total norm:
         ncalc = self.global_dot(psi, psi)
 
-        # Total Hamaltonian:
-        density = psi.conj() * self.density_operator * psi
-        H_psi = K_psi + (V + self.g * density) * psi
-
         # Expectation value and uncertainty of Hamiltonian gives the
         # expectation value and uncertainty of the chemical potential:
-        mucalc = self.global_dot(psi, H_psi)/ncalc
+        mucalc = self.global_dot(psi, total_H_psi)/ncalc
         if uncertainty:
-            mu2calc = self.global_dot(H_psi, H_psi)/ncalc
+            mu2calc = self.global_dot(total_H_psi, total_H_psi)/ncalc
             var_mucalc = mu2calc - mucalc**2
             if var_mucalc < 0:
                 u_mucalc = 0
@@ -348,79 +438,85 @@ class BEC2DSimulator(object):
         else:
             return mucalc
 
-    def compute_energy(self, psi, V, uncertainty=False):
-        """Calculate total energy of DVR basis wavefunction psi with
-        potential V (same shape as psi), and optionally its uncertainty"""
+    def successive_overrelaxation(self, psi_guess, H, K_diags, mu, t=0,
+                                  convergence=1e-14, relaxation_parameter=1.7,
+                                  output_group=None, output_interval=100, output_callback=None):
+        """Find the groundstate corresponding to a particular chemical
+        potential using successive over-relaxation.
 
-        # Total kinetic energy operator operating on psi:
-        K_psi = self.compute_K_psi(psi)
+        H(t, psi, x_elements, y_elements, x_points, y_points) should return
+        three arrays, K_psi, U, and U_nonlinear, each corresponding to
+        different terms in the Hamiltonian operating on psi. The first array,
+        K_psi, should be the kinetic energy operator acting on psi. This
+        should comprise only linear combinations of the derivative operators
+        provided by this class, acting on psi. MPI communication will be
+        performed on this array to include contributions from adjacent MPI
+        tasks. K_psi should include any terms that contain derivatives, such
+        as rotation terms with first derivatives. The second array returned
+        must be the sum of terms that are diagonal in the spatial basis, i.e,
+        no derivative operators, and must be linear in psi. This is typically
+        the potential and and couplings between states. The third array ,
+        U_nonlinear, must be the nonlinear term, and can be constructed by
+        multiplying the nonlinear constant by self.density_operator. U and
+        U_nonlinear should not be multiplied by psi before being returned.
 
-        density = psi.conj() * self.density_operator * psi
+        K_diags(x, y) should return the diagonals of the kinetic part of the
+        Hamiltonian only, that is, the part of the Hamiltonian corresponding
+        to the first array returned by H_psi (but not acting on psi).
 
-        # Total energy operator. Differs from total Hamiltonian in that the
-        # nonlinear term is halved in order to avoid double counting the
-        # interaction energy:
-        E_total_psi = K_psi + (V + 0.5*self.g * density) * psi
-        Ecalc = self.global_dot(psi, E_total_psi)
-        if uncertainty:
-            E2calc = self.global_dot(E_total_psi, E_total_psi)
-            var_Ecalc = E2calc - Ecalc**2
-            if var_Ecalc < 0:
-                u_Ecalc = 0
-            else:
-                u_Ecalc = np.sqrt(var_Ecalc)
-            return Ecalc, u_Ecalc
-        else:
-            return Ecalc
+        mu should be the desired chemical potential.
 
-    def find_groundstate(self, psi_guess, V, mu, convergence=1e-14, relaxation_parameter=1.7,
-                         output_group=None, output_interval=100, output_callback=None):
-        """Find the groundstate of the given spatial potential V with chemical
-        potential mu. Data will be saved to a group output_group of the output
-        file every output_interval steps."""
+        Data will be saved to a group output_group of the output file every
+        output_interval steps."""
         if not self.MPI_rank: # Only one process prints to stdout:
             print('\n==========')
             print('Beginning successive over relaxation')
             print("Target chemical potential is: " + repr(mu))
             print('==========')
 
-        # We use a real array, as the arithmetic is twice as fast. Groundstate
-        # will be real anyway. This precludes attempting to find the
-        # groundstate subject to some phase constraint. This method doesn't
-        # work very well for that anyway, so use imaginary time evolution if
-        # that's what you want to do.
-        psi = np.abs(psi_guess)
+        psi = np.array(psi_guess, dtype=complex)
 
-        # Kinetic energy operators:
-        Kx = self.Kx
-        Ky = self.Ky
+        # Diagonals of the nondiagonal part of the Hamiltonian, shape (1, 1,
+        # Nx, Ny) if spatially homogenous, otherwise  (n_elements_x,
+        # n_elements_y, Nx, Ny):
+        K_diags = K_diags(self.x, self.y).copy()
 
-        # Diagonals of the total kinetic energy operator, shape (Nx, Ny):
-        Kx_diags = Kx.diagonal().copy()
-        Kx_diags[0] *= 2
-        Kx_diags[-1] *= 2
-        Ky_diags = Ky.diagonal().copy()
-        Ky_diags[0] *= 2
-        Ky_diags[-1] *= 2
-        K_diags = Kx_diags[:, np.newaxis] + Ky_diags[np.newaxis, :]
+        # Instead of summing across edges we can just multiply by two at the
+        # edges to get the full values of the diagonals there:
+        K_diags[:, :, :, (0, -1)] *= 2
+        K_diags[:, :, (0, -1), :] *= 2
 
-        # Arrays for storing the x and y kinetic energy terms, which are
-        # needed by neighboring points at edges:
-        Kx_psi = np.einsum('ij,xyjl->xyil', Kx,  psi)
-        Ky_psi = np.einsum('kl,xyjl->xyjk', Ky,  psi)
+        # Empty arrays for re-using each step:
+        K_psi = np.zeros(psi.shape, dtype=complex)
+        U = np.zeros(psi.shape, dtype=complex)
+        U_nonlinear = np.zeros(psi.shape, dtype=complex)
+        H_diags = np.zeros(psi.shape, dtype=complex)
+        H_hollow_psi = np.zeros(psi.shape, dtype=complex)
+        psi_new_GS = np.zeros(psi.shape, dtype=complex)
 
-        j_indices = np.array(range(self.Nx))[:, np.newaxis]*np.ones(self.Ny)[np.newaxis, :]
-        k_indices = np.array(range(self.Ny))[np.newaxis, :]*np.ones(self.Ny)[:, np.newaxis]
-        edges = (j_indices == 0) | (k_indices == 0) | (j_indices == self.Nx - 1) | (k_indices == self.Ny - 1)
+        # All the slices for covering the edges of the boundary elements and internal elements:
+        BOUNDARY_ELEMENT_EDGES = (self.BOUNDARY_ELEMENTS_X_EDGE_POINTS_X, self.BOUNDARY_ELEMENTS_Y_EDGE_POINTS_X,
+                                   self.BOUNDARY_ELEMENTS_X_EDGE_POINTS_Y, self.BOUNDARY_ELEMENTS_Y_EDGE_POINTS_Y)
+        INTERIOR_ELEMENT_EDGES = (self.INTERIOR_ELEMENTS_EDGE_POINTS_X, self.INTERIOR_ELEMENTS_EDGE_POINTS_Y)
 
         # Each loop we first update the edges of each element, then we loop
         # over the internal basis points. Here we just create the list of
-        # indices we iterate over:
-        points_and_indices = []
-        points_and_indices.append((edges, None, None))
+        # slices for selecting which points we are operating on:
+        point_selections = []
+        # We want something we can index psi with to select edges of elements.
+        # Slices can't do that, so we have to use a boolean array for the last
+        # two dimensions:
+        EDGE_POINTS = np.zeros((self.Nx, self.Ny), dtype=bool)
+        EDGE_POINTS[FIRST] = EDGE_POINTS[LAST] = EDGE_POINTS[:, FIRST] = EDGE_POINTS[:, LAST] = True
+        EDGE_POINT_SLICES = (ALL, ALL, EDGE_POINTS)
+        point_selections.append(EDGE_POINT_SLICES)
+        # These indicate to do internal points:
         for j in range(1, self.Nx-1):
             for k in range(1, self.Ny-1):
-                points_and_indices.append(((j_indices == j) & (k_indices == k), j, k))
+                # A set of slices selecting a single non-edge point in every
+                # element .
+                slices = (ALL, ALL, np.s_[j:j+1], np.s_[k:k+1])
+                point_selections.append(slices)
 
         if output_group is not None:
             with h5py.File(self.output_file, driver='mpio', comm=MPI.COMM_WORLD) as f:
@@ -436,7 +532,7 @@ class BEC2DSimulator(object):
                     self.output_row[output_group] = group = len(f['output'][output_group]['output_log']) - 1
 
         def do_output():
-            mucalc = self.compute_mu(psi, V)
+            mucalc = self.compute_mu(t, psi, H)
             convergence_calc = abs((mucalc - mu)/mu)
             time_per_step = (time.time() - start_time)/i if i else np.nan
             message =  ('step: %d'%i +
@@ -450,7 +546,8 @@ class BEC2DSimulator(object):
                 self.output(output_group, psi, output_log)
             if output_callback is not None:
                 try:
-                    output_callback(psi, output_log)
+                    pass
+                    # output_callback(psi, output_log)
                 except Exception:
                     traceback.print_exc()
             return convergence_calc
@@ -464,100 +561,32 @@ class BEC2DSimulator(object):
         start_time = time.time()
         while True:
             # We operate on all elements at once, but only some DVR basis functions at a time.
-            for points, j, k, in points_and_indices:
-                if points is edges:
-
-                    # First we compute the values that we will need to send to
-                    # adjacent processes, and then those on the edges of
-                    # internal elements. This allows us to send data with MPI
-                    # as soon as possible and receive as late as possibly, so
-                    # that we are still doing useful work if there is high
-                    # latency.
-
-                    # Evaluating Kx_psi on the left and right edges of the
-                    # left and rightmost elements:
-                    Kx_psi[:] = 0
-                    Ky_psi[:] = 0
-                    # Evaluating Kx_psi on the left and right edges of the
-                    # left and rightmost elements:
-                    Kx_psi[0, :, 0, :] = np.einsum('j,yjl->yl', Kx[0, :], psi[0, :, :, :])
-                    Kx_psi[0, :, -1, :] = np.einsum('j,yjl->yl', Kx[-1, :], psi[0, :, :, :])
-                    Kx_psi[-1, :, 0, :] = np.einsum('j,yjl->yl', Kx[0, :], psi[-1, :, :, :])
-                    Kx_psi[-1, :, -1, :] = np.einsum('j,yjl->yl', Kx[-1, :], psi[-1, :, :, :])
-                    # Evaluating Ky_psi on the upper and lower edges of the
-                    # top and bottom elements:
-                    Ky_psi[:, 0, :, 0] = np.einsum('l,xjl->xj', Ky[0, :], psi[:, 0, :, :])
-                    Ky_psi[:, 0, :, -1] = np.einsum('l,xjl->xj', Ky[-1, :], psi[:, 0, :, :])
-                    Ky_psi[:, -1, :, 0] = np.einsum('l,xjl->xj', Ky[0, :], psi[:, -1, :, :])
-                    Ky_psi[:, -1, :, -1] = np.einsum('l,xjl->xj', Ky[-1, :], psi[:, -1, :, :])
-
-                    # Send values on the border to adjacent MPI tasks:
-                    self.MPI_left_send_buffer[:] = Kx_psi[0, :, 0, :].reshape(self.n_elements_y * self.Ny)
-                    self.MPI_right_send_buffer[:] = Kx_psi[-1, :, -1, :].reshape(self.n_elements_y * self.Ny)
-                    self.MPI_down_send_buffer[:] = Ky_psi[:, 0, :, 0].reshape(self.n_elements_x * self.Nx)
-                    self.MPI_up_send_buffer[:] = Ky_psi[:, -1, :, -1].reshape(self.n_elements_x * self.Nx)
-                    MPI.Prequest.Startall(self.MPI_all_requests)
-
-                    # Evaluating Kx_psi at the rest of the edges we haven't
-                    # done yet. Man, there's some crazy indexing going on
-                    # here. The first line below is doing the left and right
-                    # edges of all elements except the leftmost and rightmost
-                    # elements, which we've already done. The second line is
-                    # doing the top and bottom edges of all elements, but
-                    # excluding the corners because they were already done by
-                    # the first line.
-                    Kx_psi[1:-1, :, (0, -1), :] = np.einsum('ij,xyjl->xyil', Kx[(0, -1), :],  psi[1:-1, :, :, :])
-                    Kx_psi[:, :, 1:-1, (0, -1)] = np.einsum('ij,xyjl->xyil', Kx[1:-1, :],  psi[:, :, :, (0, -1)])
-                    # Same for Ky_psi:
-                    Ky_psi[:, 1:-1, :, (0, -1)] = np.einsum('kl,xyjl->xyjk', Ky[(0, -1), :],  psi[:, 1:-1, :, :])
-                    Ky_psi[:, :, (0, -1), 1:-1] = np.einsum('kl,xyjl->xyjk', Ky[1:-1, :],  psi[:, :, (0, -1), :])
-
-                    # Add contributions to x and y kinetic energy from both
-                    # elements adjacent to each internal edge:
-                    Kx_psi[1:, :, 0, :] = Kx_psi[:-1, :, -1, :] = Kx_psi[1:, :, 0, :] + Kx_psi[:-1, :, -1, :]
-                    Ky_psi[:, 1:, :, 0] = Ky_psi[:, :-1, :, -1] = Ky_psi[:, 1:, :, 0] + Ky_psi[:, :-1, :, -1]
-
-                    # Add contributions to x and y kinetic energy from adjacent MPI tasks:
-                    MPI.Prequest.Waitall(self.MPI_all_requests)
-                    left_data = self.MPI_left_receive_buffer.reshape((self.n_elements_y, self.Ny))
-                    right_data = self.MPI_right_receive_buffer.reshape((self.n_elements_y, self.Ny))
-                    down_data = self.MPI_down_receive_buffer.reshape((self.n_elements_x, self.Nx))
-                    up_data = self.MPI_up_receive_buffer.reshape((self.n_elements_x, self.Nx))
-                    if psi.dtype is not float:
-                        # MPI buffers are complex, but the data might be real (in the case
-                        # that SOR is being done with a real trial wavefunction), and we
-                        # don't want to emit a casting warning:
-                        left_data = left_data.real
-                        right_data = right_data.real
-                        down_data = down_data.real
-                        up_data = up_data.real
-                    Kx_psi[0, :, 0, :] += left_data
-                    Kx_psi[-1, :, -1, :] += right_data
-                    Ky_psi[:, 0, :, 0] += down_data
-                    Ky_psi[:, -1, :, -1] += up_data
+            for slices in point_selections:
+                if slices is EDGE_POINT_SLICES:
+                    # Evaluating H_psi on all edges of all elements. We
+                    # provide self.compute_H_psi with lists of slices so that
+                    # it can evaluate H_psi on the edges of the border
+                    # elements first, before doing MPI transport, so that we
+                    # can cater to high latency by doing useful work during
+                    # the transport
+                    self.compute_H_psi(t, psi, H, BOUNDARY_ELEMENT_EDGES, INTERIOR_ELEMENT_EDGES,
+                                       outarrays = (K_psi, U, U_nonlinear))
                 else:
-                    # x and y kinetic energy operator operating on psi at one internal point:
-                    Kx_psi[:, :, j, k] = np.einsum('j,xyj->xy', Kx[j, :],  psi[:, :, :, k])
-                    Ky_psi[:, :, j, k] = np.einsum('l,xyl->xy', Ky[k, :],  psi[:, :, j, :])
-
-                # Total kinetic energy operator operating on psi at the DVR point(s):
-                K_psi = Kx_psi[:, :, points] + Ky_psi[:, :, points]
-
-                # Density at the DVR point(s):
-                density = psi[:, :, points].conj() * self.density_operator[points] * psi[:, :, points]
+                    # Evaluate H_psi at an internal point in all elements, requires no MPI communication:
+                    K_psi[slices], U[slices], U_nonlinear[slices] = H(t, psi, *slices)
 
                 # Diagonals of the total Hamiltonian operator at the DVR point(s):
-                H_diags = K_diags[points] + V[:, :, points] + self.g * density
+                H_diags[slices] = K_diags[slices] + U[slices] + U_nonlinear[slices]
 
                 # Hamiltonian with diagonals subtracted off, operating on psi at the DVR point(s):
-                H_hollow_psi = K_psi - K_diags[points] * psi[:, :, points]
+                H_hollow_psi[slices] = K_psi[slices] - K_diags[slices] * psi[slices]
 
                 # The Gauss-Seidel prediction for the new psi at the DVR point(s):
-                psi_new_GS = (mu * psi[:, :, points] - H_hollow_psi)/H_diags
+                psi_new_GS[slices] = (mu * psi[slices] - H_hollow_psi[slices])/H_diags[slices]
 
                 # Update psi at the DVR point(s) with overrelaxation:
-                psi[:, :, points] += relaxation_parameter * (psi_new_GS - psi[:, :, points])
-
+                psi[slices] += relaxation_parameter * (psi_new_GS[slices] - psi[slices])
+                # time.sleep(0.3)
             if not i % output_interval:
                 convergence_calc = do_output()
                 if convergence_calc < convergence:
@@ -583,7 +612,7 @@ class BEC2DSimulator(object):
                output_group=None, output_interval=100, output_callback=None, rk4=False):
         dx_min = np.diff(self.x[0, 0, :, 0]).min()
         dy_min = np.diff(self.y[0, 0, 0, :]).min()
-        dt = timestep_factor * min(dx_min, dy_min)**2 * self.m / (2 * pi * hbar)
+        dt = timestep_factor * min(dx_min, dy_min)**2 * self.m / (2 * np.pi * self.hbar)
 
         if not self.MPI_rank: # Only one process prints to stdout:
             print('\n==========')
