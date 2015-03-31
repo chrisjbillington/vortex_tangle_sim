@@ -48,11 +48,12 @@ Ky = -hbar**2/(2*m) * simulator.grad2y
 # The Harmonic trap at our gridpoints, (n_elements_x, n_elements_y, Nx, Ny):
 V = 0.5*m*omega**2*(x**2 + y**2)
 
-def H(t, psi, x_elements, y_elements, x_points, y_points):
+def H(t, psi, *slices):
+    x_elements, y_elements, x_points, y_points = slices
     Kx = -hbar**2/(2*m) * simulator.grad2x[x_points, :]
     Ky = -hbar**2/(2*m) * simulator.grad2y[y_points, :]
-    U = V[x_elements, y_elements, x_points, y_points]
-    U_nonlinear = g * simulator.density_operator[x_points, y_points]
+    U = V[slices]
+    U_nonlinear = g * psi[slices].conj() * simulator.density_operator[x_points, y_points] * psi[slices]
     return Kx, Ky, U, U_nonlinear
 
 def K_diags(x, y):
@@ -66,6 +67,7 @@ def K_diags(x, y):
 @inmain_decorator()
 def plot(psi, output_log):
     if SHOW_PLOT:
+        import matplotlib
         global image_item
         x_plot, y_plot, psi_interp = simulator.elements.interpolate_vector(psi, Nx, Ny)
         rho = np.abs(psi_interp)**2
@@ -111,7 +113,7 @@ def run_sims():
 
     psi = simulator.elements.make_vector(initial_guess)
     simulator.normalise(psi, N_2D)
-    psi = simulator.find_groundstate(psi, H, V, mu, output_group='initial', output_interval=10, output_callback=plot)
+    psi = simulator.find_groundstate(psi, H, mu, output_group='initial', output_interval=10, output_callback=plot)
 
     # # Scatter some vortices randomly about.
     # # Ensure all MPI tasks agree on the location of the vortices, by

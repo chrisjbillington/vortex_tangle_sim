@@ -5,7 +5,6 @@ import time
 import traceback
 
 import numpy as np
-from scipy.linalg import expm
 from mpi4py import MPI
 import h5py
 
@@ -30,9 +29,6 @@ def show_slices(slices, shape, show=False):
     ax.grid(which='minor', axis='both', linestyle='-')
     if show:
         pl.show()
-
-hbar = 1.054571726e-34
-pi = np.pi
 
 # Some slice objects for conveniently slicing axes in multidimensional arrays:
 FIRST = np.s_[:1]
@@ -81,10 +77,10 @@ def get_best_2D_segmentation(size_x, size_y, N_segments):
 
 class Simulator2D(object):
     def __init__(self, m, g, x_min_global, x_max_global, y_min_global, y_max_global, Nx, Ny,
-                 n_elements_x_global, n_elements_y_global, output_file=None, resume=True, natural_units=False):
-        """A class for simulating the Gross-Pitaevskii equation in 2D with the
-        finite element discrete variable representation, on multiple cores if
-        using MPI"""
+                 n_elements_x_global, n_elements_y_global, output_file=None, resume=False, natural_units=False):
+        """A class for simulating a the nonlinear Schrodinger equation in two
+        spatial dimensions with the finite element discrete variable
+        representation, on multiple cores if using MPI"""
         if (n_elements_x_global % 2):
             raise ValueError("Odd-even split step method requires even n_elements_x_global")
         if (n_elements_y_global % 2):
@@ -93,11 +89,12 @@ class Simulator2D(object):
         self.x_max_global = x_max_global
         self.y_min_global = y_min_global
         self.y_max_global = y_max_global
+        self.Nx = Nx
+        self.Ny = Ny
         self.n_elements_x_global = n_elements_x_global
         self.n_elements_y_global = n_elements_y_global
         self.output_file = output_file
-        self.Nx = Nx
-        self.Ny = Ny
+        self.resume = resume
         self.m = m
         self.g = g
         self.element_width_x = (self.x_max_global - self.x_min_global)/self.n_elements_x_global
@@ -130,8 +127,8 @@ class Simulator2D(object):
             self.hbar = 1.054571726e-34
 
         # Kinetic energy operators:
-        self.Kx = -hbar**2 / (2 * self.m) * self.grad2x
-        self.Ky = -hbar**2 / (2 * self.m) * self.grad2y
+        self.Kx = -self.hbar**2 / (2 * self.m) * self.grad2x
+        self.Ky = -self.hbar**2 / (2 * self.m) * self.grad2y
 
         if self.output_file is not None:
             with h5py.File(self.output_file, 'w', driver='mpio', comm=MPI.COMM_WORLD) as f:
@@ -250,69 +247,90 @@ class Simulator2D(object):
 
         # The data we want to send to adjacent processes isn't in contiguous
         # memory, so we need to copy it into and out of temporary buffers:
-        self.MPI_left_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
-        self.MPI_left_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
-        self.MPI_right_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
-        self.MPI_right_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
-        self.MPI_up_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
-        self.MPI_up_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
-        self.MPI_down_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
-        self.MPI_down_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
 
-        # We need to tag our data in case there are exactly two MPI tasks in a
-        # direction, in which case we need a way other than rank to
-        # distinguish between the two messages the two tasks might be sending
-        # each other at one time:
-        TAG_LEFT_TO_RIGHT = 0
-        TAG_RIGHT_TO_LEFT = 1
-        TAG_DOWN_TO_UP = 2
-        TAG_UP_TO_DOWN = 3
+        # Buffers for operating on psi with operators that are non-diagonal in
+        # the spatial basis, requiring summing contributions from adjacent
+        # elements:
+        self.MPI_left_kinetic_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
+        self.MPI_left_kinetic_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
+        self.MPI_right_kinetic_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
+        self.MPI_right_kinetic_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
+        self.MPI_top_kinetic_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_top_kinetic_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_bottom_kinetic_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_bottom_kinetic_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+
+        # Buffers for sending values of psi to adjacent processes. Values are
+        # supposed to be identical on edges of adjacent elements, but due to
+        # rounding error they may not stay perfectly identical. This can be a
+        # problem, so we send the values across from one to the other once a
+        # timestep to keep them agreeing.
+        self.MPI_left_values_send_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
+        self.MPI_right_values_receive_buffer = np.zeros((self.Ny * self.n_elements_y), dtype=complex)
+        self.MPI_bottom_values_send_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+        self.MPI_top_values_receive_buffer = np.zeros((self.Nx * self.n_elements_x), dtype=complex)
+
+        # We need to tag our data to have a way other than rank to distinguish
+        # between multiple messages the two tasks might be sending each other
+        # at the same time:
+        TAG_LEFT_TO_RIGHT_NONDIAGS = 0
+        TAG_RIGHT_TO_LEFT_NONDIAGS = 1
+        TAG_DOWN_TO_UP_NONDIAGS = 2
+        TAG_UP_TO_DOWN_NONDIAGS = 3
+        TAG_RIGHT_TO_LEFT_VALUES = 4
+        TAG_UP_TO_DOWN_VALUES = 5
 
         # Create persistent requests for the data transfers we will regularly be doing:
-        self.MPI_send_left = self.MPI_comm.Send_init(self.MPI_left_send_buffer,
-                                                     self.MPI_rank_left, tag=TAG_RIGHT_TO_LEFT)
-        self.MPI_send_right = self.MPI_comm.Send_init(self.MPI_right_send_buffer,
-                                                      self.MPI_rank_right, tag=TAG_LEFT_TO_RIGHT)
-        self.MPI_receive_left = self.MPI_comm.Recv_init(self.MPI_left_receive_buffer,
-                                                        self.MPI_rank_left, tag=TAG_LEFT_TO_RIGHT)
-        self.MPI_receive_right = self.MPI_comm.Recv_init(self.MPI_right_receive_buffer,
-                                                         self.MPI_rank_right, tag=TAG_RIGHT_TO_LEFT)
-        self.MPI_send_down = self.MPI_comm.Send_init(self.MPI_down_send_buffer,
-                                                     self.MPI_rank_down, tag=TAG_UP_TO_DOWN)
-        self.MPI_send_up = self.MPI_comm.Send_init(self.MPI_up_send_buffer,
-                                                      self.MPI_rank_up, tag=TAG_DOWN_TO_UP)
-        self.MPI_receive_down = self.MPI_comm.Recv_init(self.MPI_down_receive_buffer,
-                                                        self.MPI_rank_down, tag=TAG_DOWN_TO_UP)
-        self.MPI_receive_up = self.MPI_comm.Recv_init(self.MPI_up_receive_buffer,
-                                                         self.MPI_rank_up, tag=TAG_UP_TO_DOWN)
+        self.MPI_send_kinetic_left = self.MPI_comm.Send_init(self.MPI_left_kinetic_send_buffer,
+                                                             self.MPI_rank_left, tag=TAG_RIGHT_TO_LEFT_NONDIAGS)
+        self.MPI_send_kinetic_right = self.MPI_comm.Send_init(self.MPI_right_kinetic_send_buffer,
+                                                              self.MPI_rank_right, tag=TAG_LEFT_TO_RIGHT_NONDIAGS)
+        self.MPI_receive_kinetic_left = self.MPI_comm.Recv_init(self.MPI_left_kinetic_receive_buffer,
+                                                                self.MPI_rank_left, tag=TAG_LEFT_TO_RIGHT_NONDIAGS)
+        self.MPI_receive_kinetic_right = self.MPI_comm.Recv_init(self.MPI_right_kinetic_receive_buffer,
+                                                                 self.MPI_rank_right, tag=TAG_RIGHT_TO_LEFT_NONDIAGS)
+        self.MPI_send_kinetic_bottom = self.MPI_comm.Send_init(self.MPI_bottom_kinetic_send_buffer,
+                                                               self.MPI_rank_down, tag=TAG_UP_TO_DOWN_NONDIAGS)
+        self.MPI_send_kinetic_top = self.MPI_comm.Send_init(self.MPI_top_kinetic_send_buffer,
+                                                            self.MPI_rank_up, tag=TAG_DOWN_TO_UP_NONDIAGS)
+        self.MPI_receive_kinetic_bottom = self.MPI_comm.Recv_init(self.MPI_bottom_kinetic_receive_buffer,
+                                                                  self.MPI_rank_down, tag=TAG_DOWN_TO_UP_NONDIAGS)
+        self.MPI_receive_kinetic_top = self.MPI_comm.Recv_init(self.MPI_top_kinetic_receive_buffer,
+                                                               self.MPI_rank_up, tag=TAG_UP_TO_DOWN_NONDIAGS)
+        self.MPI_send_values_left = self.MPI_comm.Send_init(self.MPI_left_values_send_buffer,
+                                                            self.MPI_rank_left, tag=TAG_RIGHT_TO_LEFT_VALUES)
+        self.MPI_receive_values_right = self.MPI_comm.Recv_init(self.MPI_right_values_receive_buffer,
+                                                                self.MPI_rank_right, tag=TAG_RIGHT_TO_LEFT_VALUES)
+        self.MPI_send_values_down = self.MPI_comm.Send_init(self.MPI_bottom_values_send_buffer,
+                                                            self.MPI_rank_down, tag=TAG_UP_TO_DOWN_VALUES)
+        self.MPI_receive_values_up = self.MPI_comm.Recv_init(self.MPI_top_values_receive_buffer,
+                                                             self.MPI_rank_up, tag=TAG_UP_TO_DOWN_VALUES)
 
-        self.MPI_all_requests = [self.MPI_send_left, self.MPI_receive_left,
-                                 self.MPI_send_right, self.MPI_receive_right,
-                                 self.MPI_send_down, self.MPI_receive_down,
-                                 self.MPI_send_up, self.MPI_receive_up]
+        self.MPI_kinetic_requests = [self.MPI_send_kinetic_left, self.MPI_receive_kinetic_left,
+                                     self.MPI_send_kinetic_right, self.MPI_receive_kinetic_right,
+                                     self.MPI_send_kinetic_bottom, self.MPI_receive_kinetic_bottom,
+                                     self.MPI_send_kinetic_top, self.MPI_receive_kinetic_top]
 
-        self.MPI_left_to_right_requests = [self.MPI_send_right, self.MPI_receive_left]
-        self.MPI_right_to_left_requests = [self.MPI_send_left, self.MPI_receive_right]
-        self.MPI_down_to_up_requests = [self.MPI_send_up, self.MPI_receive_down]
-        self.MPI_up_to_down_requests = [self.MPI_send_down, self.MPI_receive_up]
+        self.MPI_values_requests = [self.MPI_send_values_left, self.MPI_receive_values_right,
+                                    self.MPI_send_values_down, self.MPI_receive_values_up]
 
     def MPI_send_border_kinetic(self, Kx_psi, Ky_psi):
         """Start an asynchronous MPI send to all adjacent MPI processes,
         sending them the values of H_nondiag_psi on the borders"""
-        self.MPI_left_send_buffer[:] = Kx_psi[LEFT_BOUNDARY].reshape(self.n_elements_y * self.Ny)
-        self.MPI_right_send_buffer[:] = Kx_psi[RIGHT_BOUNDARY].reshape(self.n_elements_y * self.Ny)
-        self.MPI_down_send_buffer[:] = Ky_psi[BOTTOM_BOUNDARY].reshape(self.n_elements_x * self.Nx)
-        self.MPI_up_send_buffer[:] = Ky_psi[TOP_BOUNDARY].reshape(self.n_elements_x * self.Nx)
-        MPI.Prequest.Startall(self.MPI_all_requests)
+        self.MPI_left_kinetic_send_buffer[:] = Kx_psi[LEFT_BOUNDARY].reshape(self.n_elements_y * self.Ny)
+        self.MPI_right_kinetic_send_buffer[:] = Kx_psi[RIGHT_BOUNDARY].reshape(self.n_elements_y * self.Ny)
+        self.MPI_bottom_kinetic_send_buffer[:] = Ky_psi[BOTTOM_BOUNDARY].reshape(self.n_elements_x * self.Nx)
+        self.MPI_top_kinetic_send_buffer[:] = Ky_psi[TOP_BOUNDARY].reshape(self.n_elements_x * self.Nx)
+        MPI.Prequest.Startall(self.MPI_kinetic_requests)
 
     def MPI_receive_border_kinetic(self, Kx_psi, Ky_psi):
         """Finalise an asynchronous MPI transfer from all adjacent MPI processes,
         receiving values into H_nondiag_psi on the borders"""
-        MPI.Prequest.Waitall(self.MPI_all_requests)
-        left_data = self.MPI_left_receive_buffer.reshape((1, self.n_elements_y, 1, self.Ny))
-        right_data = self.MPI_right_receive_buffer.reshape((1, self.n_elements_y, 1, self.Ny))
-        bottom_data = self.MPI_down_receive_buffer.reshape((self.n_elements_x, 1, self.Nx, 1))
-        top_data = self.MPI_up_receive_buffer.reshape((self.n_elements_x, 1, self.Nx, 1))
+        MPI.Prequest.Waitall(self.MPI_kinetic_requests)
+        left_data = self.MPI_left_kinetic_receive_buffer.reshape((1, self.n_elements_y, 1, self.Ny))
+        right_data = self.MPI_right_kinetic_receive_buffer.reshape((1, self.n_elements_y, 1, self.Ny))
+        bottom_data = self.MPI_bottom_kinetic_receive_buffer.reshape((self.n_elements_x, 1, self.Nx, 1))
+        top_data = self.MPI_top_kinetic_receive_buffer.reshape((self.n_elements_x, 1, self.Nx, 1))
         if Kx_psi.dtype == np.float:
             # MPI buffers are complex, but the data might be real (in the case
             # that SOR is being done with a real trial wavefunction), and we
@@ -345,15 +363,14 @@ class Simulator2D(object):
         ncalc = self.global_dot(psi, psi)
         psi[:] *= np.sqrt(N_2D/ncalc)
 
-    def compute_H(self, psi, boundary_element_slices=None, internal_element_slices=None, outarrays=None):
-        """Operate on psi with the total kinetic energy operator and return
-        the result."""
-        """Applies the Hamiltonian to psi with H_psi, sums the nondiagonal
-        contributions at element edges and MPI task borders, and returns the
-        resulting three terms H_nondiag_psi, H_diag_psi, nonlinear_psi. We
-        don't sum them together here because the caller may with to treat them
-        separately in an energy calculation, such as dividing the nonlinear
-        term by two before summing up the total energy.
+    def compute_H(self, t, psi, H, boundary_element_slices=None, internal_element_slices=None, outarrays=None):
+        """Applies the Hamiltonian H to the wavefunction psi at time t, sums the
+        kinetic terms at element edges and MPI task borders, and returns the
+        resulting three terms K_psi, U, andn U_nonlinear. We don't sum them
+        together here because the caller may with to treat them separately in
+        an energy calculation, such as dividing the nonlinear term by two before
+        summing up the total energy. The latter two terms are returned without
+        having been multiplied by psi.
 
         boundary_element_slices and internal_element slices can be provided to
         specify which points should be evaluated. If both are None, all points
@@ -380,41 +397,48 @@ class Simulator2D(object):
         # contain as few as possible other points - they should be be in
         # post_MPI_slices and be evaluated after the MPI send has been done.
 
-        # Evaluating Kx_psi and Ky_psi on the border elements first:
-        Kx_psi[(0, -1), :, :, :] = np.einsum('ij,xyjl->xyil', self.Kx,  psi[(0, -1), :, :, :])
-        Ky_psi[:, (0, -1), :, :] = np.einsum('kl,xyjl->xyjk', self.Ky,  psi[:, (0, -1), :, :])
+        if boundary_element_slices is internal_element_slices is None:
+            boundary_element_slices = (self.BOUNDARY_ELEMENTS_X_ALL_POINTS, self.BOUNDARY_ELEMENTS_Y_ALL_POINTS)
+            internal_element_slices = (INTERIOR_ELEMENTS,)
+
+        # Evaluate H_psi at the boundary elements, if there are any:
+        for slices in boundary_element_slices:
+            x_elements, y_elements, x_points, y_points = slices
+            Kx, Ky, U[slices], U_nonlinear[slices] = H(t, psi, *slices)
+            Kx_psi[slices] = np.einsum('ij,xyjl->xyil', Kx,  psi[x_elements, y_elements, :, y_points])
+            Ky_psi[slices] = np.einsum('kl,xyjl->xyjk', Ky,  psi[x_elements, y_elements, x_points, :])
 
         # Send values on the border to adjacent MPI tasks:
         self.MPI_send_border_kinetic(Kx_psi, Ky_psi)
 
-        # Evaluating Kx_psi and Ky_psi at all internal elements:
-        Kx_psi[1:-1, :, :, :] = np.einsum('ij,xyjl->xyil', self.Kx,  psi[1:-1, :, :, :])
-        Ky_psi[:, 1:-1, :, :] = np.einsum('kl,xyjl->xyjk', self.Ky,  psi[:, 1:-1, :, :])
+        # Now evaluate H_psi at all internal elements:
+        for slices in internal_element_slices:
+            x_elements, y_elements, x_points, y_points = slices
+            Kx, Ky, U[slices], U_nonlinear[slices] = H(t, psi, *slices)
+            Kx_psi[slices] = np.einsum('ij,xyjl->xyil', Kx,  psi[x_elements, y_elements, :, y_points])
+            Ky_psi[slices] = np.einsum('kl,xyjl->xyjk', Ky,  psi[x_elements, y_elements, x_points, :])
 
-        K_psi = Kx_psi + Ky_psi
-
-        # Add contributions to x and y kinetic energy from both elements adjacent to each internal edge:
-        Kx_psi[1:, :, 0, :] = Kx_psi[:-1, :, -1, :] = Kx_psi[1:, :, 0, :] + Kx_psi[:-1, :, -1, :]
-        Ky_psi[:, 1:, :, 0] = Ky_psi[:, :-1, :, -1] = Ky_psi[:, 1:, :, 0] + Ky_psi[:, :-1, :, -1]
+        # Add contributions to Kx_psi and Ky_psi at edges shared by interior elements.
+        total_at_x_edges = Kx_psi[LEFT_INTERIOR_EDGEPOINTS] + Kx_psi[RIGHT_INTERIOR_EDGEPOINTS]
+        Kx_psi[LEFT_INTERIOR_EDGEPOINTS] = Kx_psi[RIGHT_INTERIOR_EDGEPOINTS] = total_at_x_edges
+        total_at_y_edges = Ky_psi[BOTTOM_INTERIOR_EDGEPOINTS] + Ky_psi[TOP_INTERIOR_EDGEPOINTS]
+        Ky_psi[BOTTOM_INTERIOR_EDGEPOINTS] = Ky_psi[TOP_INTERIOR_EDGEPOINTS] = total_at_y_edges
 
         # Add contributions to H_nondiag_psi from adjacent MPI tasks:
         self.MPI_receive_border_kinetic(Kx_psi, Ky_psi)
 
-        return Kx_psi + Ky_psi
+        return Kx_psi + Ky_psi, U, U_nonlinear
 
-    def compute_mu(self, psi, V, uncertainty=False):
+    def compute_mu(self, t, psi, H, uncertainty=False):
         """Calculate chemical potential of DVR basis wavefunction psi with
-        potential V (same shape as psi), and optionally its uncertainty."""
+        Hamiltonian H at time t. Optionally return its uncertainty."""
 
-        # Total kinetic energy operator operating on psi:
-        K_psi = self.compute_H(psi)
+        # Total Hamiltonian operator operating on psi:
+        K_psi, U, U_nonlinear = self.compute_H(t, psi, H)
+        H_psi = K_psi + (U + U_nonlinear) * psi
 
         # Total norm:
         ncalc = self.global_dot(psi, psi)
-
-        # Total Hamaltonian:
-        density = psi.conj() * self.density_operator * psi
-        H_psi = K_psi + (V + self.g * density) * psi
 
         # Expectation value and uncertainty of Hamiltonian gives the
         # expectation value and uncertainty of the chemical potential:
@@ -455,7 +479,7 @@ class Simulator2D(object):
         else:
             return Ecalc
 
-    def find_groundstate(self, psi_guess, H, V, mu, t=0, convergence=1e-14, relaxation_parameter=1.7,
+    def find_groundstate(self, psi_guess, H, mu, t=0, convergence=1e-14, relaxation_parameter=1.7,
                          output_group=None, output_interval=100, output_callback=None):
         """Find the groundstate corresponding to a particular chemical
         potential using successive over-relaxation.
@@ -512,8 +536,6 @@ class Simulator2D(object):
         Kx_psi = np.zeros(psi.shape, dtype=complex)
         Ky_psi = np.zeros(psi.shape, dtype=complex)
         K_psi = np.zeros(psi.shape, dtype=complex)
-        U = np.zeros(psi.shape, dtype=complex)
-        U_nonlinear = np.zeros(psi.shape, dtype=complex)
         H_diags = np.zeros(psi.shape, dtype=complex)
         H_hollow_psi = np.zeros(psi.shape, dtype=complex)
         psi_new_GS = np.zeros(psi.shape, dtype=complex)
@@ -567,7 +589,7 @@ class Simulator2D(object):
                     self.output_row[output_group] = group = len(f['output'][output_group]['output_log']) - 1
 
         def do_output():
-            mucalc = self.compute_mu(psi, V)
+            mucalc = self.compute_mu(t, psi, H)
             convergence_calc = abs((mucalc - mu)/mu)
             time_per_step = (time.time() - start_time)/i if i else np.nan
             message =  ('step: %d'%i +
@@ -596,7 +618,7 @@ class Simulator2D(object):
         while True:
             # We operate on all elements at once, but only some DVR basis functions at a time.
             for (points, j, k), slices in zip(points_and_indices, point_selections):
-                if points is edges:
+                if slices is EDGE_POINT_SLICES:
 
                     # First we compute the values that we will need to send to
                     # adjacent processes, and then those on the edges of
@@ -650,8 +672,8 @@ class Simulator2D(object):
                     
                 else:
                     # x and y kinetic energy operator operating on psi at one internal point:
-                    Kx_psi[:, :, j, k] = np.einsum('j,xyj->xy', Kx[j, :],  psi[:, :, :, k])
-                    Ky_psi[:, :, j, k] = np.einsum('l,xyl->xy', Ky[k, :],  psi[:, :, j, :])
+                    Kx_psi[slices] = np.einsum('j,xyj->xy', Kx[j, :],  psi[:, :, :, k])[:, :, np.newaxis, np.newaxis]
+                    Ky_psi[slices] = np.einsum('l,xyl->xy', Ky[k, :],  psi[:, :, j, :])[:, :, np.newaxis, np.newaxis]
 
                 # Total kinetic energy operator operating on psi at the DVR point(s):
                 K_psi[:, :, points] = Kx_psi[:, :, points] + Ky_psi[:, :, points]
@@ -660,7 +682,7 @@ class Simulator2D(object):
                 density = psi[:, :, points].conj() * self.density_operator[points] * psi[:, :, points]
 
                 # Diagonals of the total Hamiltonian operator at the DVR point(s):
-                H_diags = K_diags[points] + V[:, :, points] + self.g * density
+                H_diags = K_diags[points] + U[:, :, points] + self.g * density
 
                 # Hamiltonian with diagonals subtracted off, operating on psi at the DVR point(s):
                 H_hollow_psi = K_psi[:, :, points] - K_diags[points] * psi[:, :, points]
