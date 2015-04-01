@@ -285,13 +285,14 @@ class FiniteElements1D(object):
 
 class FiniteElements2D(object):
     """A class for operations on an array of identical DVR finite elements in two dimensions"""
-    def __init__(self, Nx, Ny, n_elements_x, n_elements_y,
+    def __init__(self, n_elements_x, n_elements_y, Nx, Ny, n_components,
                  left_boundary, right_boundary,
-                 bottom_boundary, top_boundary, ):
-        self.Nx = Nx
-        self.Ny = Ny
+                 bottom_boundary, top_boundary):
         self.n_elements_x = n_elements_x
         self.n_elements_y = n_elements_y
+        self.Nx = Nx
+        self.Ny = Ny
+        self.n_components = n_components
         self.left_boundary = left_boundary
         self.right_boundary = right_boundary
         self.top_boundary = top_boundary
@@ -313,60 +314,91 @@ class FiniteElements2D(object):
         self.element_y = Element(Ny, 0, self.element_width_y, N_left=Ny, N_right=Ny,
                                  width_left=self.element_width_y, width_right=self.element_width_y)
 
-        # construct a (self.n_elements_x x self.Nx) array for the quadrature
-        # points in the x direction. The following is an 'outer sum' between
-        # the position of points within an element, and the position of the
-        # left edges of the elements:
+        # The shape of  vectors. The extra dimension at the end is so that
+        # operators on one of our dimensions, which have size > 1 in that
+        # dimension, have the same rank as vectors, so that we can say,
+        # multiply them easily.
+        self.shape = (self.n_elements_x, self.n_elements_y, self.Nx, self.Ny, self.n_components, 1)
+
+        # construct a (n_elements_x, 1, Nx, 1, 1, 1) array for the quadrature points in
+        # the x direction:
         self.points_x = self.element_x.points + self.element_edges_x[:-1, np.newaxis]
-        # The same for the y direction:
+        self.points_x = self.points_x.reshape((n_elements_x, 1, Nx, 1, 1, 1))
+        # The same for the y direction, shape (1, n_elements_y, 1, Ny, 1, 1):
         self.points_y = self.element_y.points + self.element_edges_y[:-1, np.newaxis]
+        self.points_y = self.points_y.reshape((1, n_elements_y, 1, Ny, 1, 1))
 
-        self.shape = (self.n_elements_x, self.n_elements_y, self.Nx, self.Ny)
+        # The product of the weights over the 2D space; shape (1, 1, Nx, Ny, 1, 1):
+        self.weights = np.outer(self.element_x.weights, self.element_y.weights)
+        self.weights = self.weights.reshape((1, 1, Nx, Ny, 1, 1))
 
-        # The above two arrays, each with extra axes inserted so that arithmetic operations
-        # on the two will return 4D arrays of shape self.shape:
-        self.points_X = self.points_x[:, np.newaxis, :, np.newaxis]
-        self.points_Y = self.points_y[np.newaxis, :, np.newaxis, :]
-
-        # The weights are identical in each element so we only need a length
-        # self.Nx array and a self.Ny array:
-        self.weights_x = self.element_x.weights
-        self.weights_y = self.element_y.weights
-
-        # The product of the weights over the 2D space; shape (self.Nx x self.Ny)
-        self.weights = np.outer(self.weights_x, self.weights_y)
-
-        # The values of each DVR basis function at its points:
+        # The values of each DVR basis function at its point; shape (1, 1, Nx, Ny, 1, 1):
         self.values = 1/np.sqrt(self.weights)
         # The basis functions at the edges have different normalisation, they
         # are 1/sqrt(2*w) rather than just 1/sqrt(w):
-        self.values[0,:] /= np.sqrt(2)
-        self.values[-1,:] /= np.sqrt(2)
-        self.values[:,0] /= np.sqrt(2)
-        self.values[:,-1] /= np.sqrt(2)
+        self.values[:, :, 0, :] /= np.sqrt(2)
+        self.values[:, :, -1, :] /= np.sqrt(2)
+        self.values[:, :, :, 0] /= np.sqrt(2)
+        self.values[:, :, :, -1] /= np.sqrt(2)
 
     def density_operator(self):
         """Returns a 1D array of size self.N representing the diagonals of the
         density operator rho on an element. vec.conj()*rho*vec then gives the
         wavefunction density |psi|^2 at each quadrature point."""
         rho = self.values**2
-        return rho
+        # SCAFFOLDING: remove reshape:
+        return rho.reshape((self.Nx, self.Ny))
 
     def derivative_operators(self):
-        """Returns a (self.Nx x self.Nx) array for the derivative operator on
-        each element in the x direction, and a self.Ny x self.Ny) array for
-        the derivative operator on each element in the y direction."""
-        return self.element_x.derivative_operator(), self.element_y.derivative_operator()
+        """Returns a (1, 1, Nx, Ny, 1, Nx) array for the first derivative
+        operator on each element in the x direction, and a (1, 1, Nx, Ny, 1,
+        Ny) array for the first derivative operator on each element in the y
+        direction. The reason both have size Nx, Ny in the Nx and Ny
+        dimensions is that the x first derivative operator is halved on the y
+        edges of an element, and likewise for the y derivative operator. This
+        is so that when we sum vectors at edges of elements, we get the right
+        result. """
+        gradx = self.element_x.second_derivative_operator()
+        grady = self.element_y.second_derivative_operator()
+        gradx = gradx.reshape(1, 1, self.Nx, 1, 1, self.Nx)
+        grady = grady.reshape(1, 1, 1, self.Ny, 1, self.Ny)
+        y_envelope = np.ones(self.Ny)
+        y_envelope[0] = y_envelope[-1] = 0.5
+        y_envelope.reshape((1, 1, 1, self.Ny, 1, 1))
+        x_envelope = np.ones(self.Nx)
+        x_envelope[0] = x_envelope[-1] = 0.5
+        x_envelope = x_envelope.reshape((1, 1, self.Nx, 1, 1, 1))
+        y_envelope = y_envelope.reshape((1, 1, 1, self.Ny, 1, 1))
+        gradx = gradx * y_envelope
+        grady = grady * x_envelope
+        return gradx, grady
 
     def second_derivative_operators(self):
-        """Returns a (self.Nx x self.Nx) array for the second derivative
-        operator on each element in the x direction, and a self.Ny x self.Ny)
-        array for the second derivative operator on each element in the y
-        direction."""
-        return self.element_x.second_derivative_operator(), self.element_y.second_derivative_operator()
+        """Returns a (1, 1, Nx, Ny, 1, Nx) array for the second derivative
+        operator on each element in the x direction, and a (1, 1, Nx, Ny, 1,
+        Ny) array for the second derivative operator on each element in the y
+        direction. The reason both have size Nx, Ny in the Nx and Ny
+        dimensions is that the x second derivative operator is halved on the y
+        edges of an element, and likewise for the y derivative operator. This
+        is so that when we sum vectors at edges of elements, we get the right
+        result. """
+        grad2x = self.element_x.second_derivative_operator()
+        grad2y = self.element_y.second_derivative_operator()
+        grad2x = grad2x.reshape(1, 1, self.Nx, 1, 1, self.Nx)
+        grad2y = grad2y.reshape(1, 1, 1, self.Ny, 1, self.Ny)
+        y_envelope = np.ones(self.Ny)
+        y_envelope[0] = y_envelope[-1] = 0.5
+        y_envelope.reshape((1, 1, 1, self.Ny, 1, 1))
+        x_envelope = np.ones(self.Nx)
+        x_envelope[0] = x_envelope[-1] = 0.5
+        x_envelope = x_envelope.reshape((1, 1, self.Nx, 1, 1, 1))
+        y_envelope = y_envelope.reshape((1, 1, 1, self.Ny, 1, 1))
+        grad2x = grad2x * y_envelope
+        grad2y = grad2y * x_envelope
+        return grad2x, grad2y
 
     def interpolate_vector(self, psi, npts_x, npts_y):
-        """Takes a (self.n_elements_x, self.n_elements_y, self.Nx, self.Ny)
+        """Takes a (n_elements_x, n_elements_y, Nx, Ny, 1, 1)
         array psi of coefficients in the FEDVR basis and interpolates the
         spatial function it represents to npts equally spaced points per
         element. Returns arrays of the x and y points used and the values at
@@ -377,7 +409,7 @@ class FiniteElements2D(object):
         f = np.zeros((self.n_elements_x, self.n_elements_y, npts_x, npts_y), dtype=complex)
         for j, basis_function_x in enumerate(self.element_x.basis):
             for k, basis_function_y in enumerate(self.element_y.basis):
-                f += (psi[:, :, j, k, np.newaxis, np.newaxis] *
+                f += (psi[:, :, j, k, 0, 0, np.newaxis, np.newaxis] * # SCAFFOLDING: remove 0, 0,
                       basis_function_x(x[:, np.newaxis]) *
                       basis_function_y(y[np.newaxis, :]))
 
@@ -394,7 +426,7 @@ class FiniteElements2D(object):
         for that function's representation in the DVR basis in each
         element."""
         psi = np.zeros(self.shape, dtype=complex)
-        psi[:] = f(self.points_X, self.points_Y)/self.values
+        psi[:] = f(self.points_x, self.points_y)/self.values
         return psi
 
     def get_values(self, psi):

@@ -1,10 +1,10 @@
 from __future__ import division, print_function
 import os
-import cPickle as pickle
+import time
 
 import numpy as np
 from PyQt4 import QtCore, QtGui
-from qtutils import inthread, inmain_decorator
+from qtutils import inthread, inmain_decorator, inmain
 
 from BEC2D import Simulator2D
 
@@ -36,8 +36,11 @@ n_elements_y_global = 32
 Nx = 7
 Ny = 7
 
-simulator = Simulator2D(x_min_global, x_max_global, y_min_global, y_max_global, Nx, Ny,
-                           n_elements_x_global, n_elements_y_global, output_file = 'vortex_test_rk4.h5')
+# Number of components to the wavefunction:
+n_components = 1
+
+simulator = Simulator2D(x_min_global, x_max_global, y_min_global, y_max_global,
+                        n_elements_x_global, n_elements_y_global, Nx, Ny, n_components, output_file = 'vortex_test_rk4.h5')
 x = simulator.x
 y = simulator.y
 
@@ -45,8 +48,9 @@ y = simulator.y
 Kx = -hbar**2/(2*m) * simulator.grad2x
 Ky = -hbar**2/(2*m) * simulator.grad2y
 
-# The Harmonic trap at our gridpoints, (n_elements_x, n_elements_y, Nx, Ny):
-V = 0.5*m*omega**2*(x**2 + y**2)
+# The Harmonic trap at our gridpoints, (n_elements_x, n_elements_y, Nx, Ny, n_components, 1):
+# SCAFFOLDING: remove reshape:
+V = 0.5*m*omega**2*(x**2 + y**2).reshape((n_elements_x_global, n_elements_y_global, Nx, Ny))
 
 def H(t, psi, *slices):
     x_elements, y_elements, x_points, y_points = slices
@@ -74,11 +78,12 @@ def plot(psi, output_log):
             image_item = pg.ImageItem(rgb)
             view_box.addItem(image_item)
             graphics_view.resize(2*rgb.shape[0], 2*rgb.shape[1])
+            graphics_view.move(0,0)
             graphics_view.show()
         image_item.updateImage(rgb)
 
 SHOW_PLOT = True
-SHOW_PLOT = False
+# SHOW_PLOT = False
 if not os.getenv('DISPLAY'):
     # But not if there is no x server:
     SHOW_PLOT = False
@@ -87,6 +92,7 @@ if SHOW_PLOT:
     import pyqtgraph as pg
     qapplication = QtGui.QApplication([])
     graphics_view = pg.GraphicsView()
+    graphics_view.setAttribute(QtCore.Qt.WA_ShowWithoutActivating)
     graphics_view.setWindowTitle('MPI task %d'%simulator.MPI_rank)
     view_box = pg.ViewBox()
     graphics_view.setCentralItem(view_box)
@@ -102,11 +108,13 @@ def initial_guess(x, y):
 def run_sims():
     # import lineprofiler
     # lineprofiler.setup(outfile='lineprofile-%d.txt'%MPI_rank)
-
-    psi = simulator.elements.make_vector(initial_guess)
-    simulator.normalise(psi, N_2D)
-    psi = simulator.find_groundstate(psi, H, mu, output_group='initial', output_interval=10, output_callback=plot)
-
+    try:
+        psi = simulator.elements.make_vector(initial_guess)
+        simulator.normalise(psi, N_2D)
+        psi = simulator.find_groundstate(psi, H, mu, output_group='initial', output_interval=10, output_callback=plot)
+    finally:
+        if SHOW_PLOT:
+            inmain(qapplication.exit)
     # # Scatter some vortices randomly about.
     # # Ensure all MPI tasks agree on the location of the vortices, by
     # # seeding the pseudorandom number generator with the same seed in
@@ -144,3 +152,4 @@ else:
     signal.signal(signal.SIGINT, lambda *args: qapplication.exit())
 
     qapplication.exec_()
+    time.sleep(1)
