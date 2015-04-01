@@ -36,7 +36,7 @@ n_elements_y_global = 32
 Nx = 7
 Ny = 7
 
-simulator = Simulator2D(m, g, x_min_global, x_max_global, y_min_global, y_max_global, Nx, Ny,
+simulator = Simulator2D(x_min_global, x_max_global, y_min_global, y_max_global, Nx, Ny,
                            n_elements_x_global, n_elements_y_global, output_file = 'vortex_test_rk4.h5')
 x = simulator.x
 y = simulator.y
