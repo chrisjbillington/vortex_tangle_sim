@@ -56,14 +56,6 @@ def H(t, psi, *slices):
     U_nonlinear = g * psi[slices].conj() * simulator.density_operator[x_points, y_points] * psi[slices]
     return Kx, Ky, U, U_nonlinear
 
-def K_diags(x, y):
-    """Return the diagonals of the nondiagonal part of the Hamiltonian. Must
-    have the same dimensionality as psi, so we add dimensions of size one for
-    n_elements_x and n_elements_y. If we had rotation terms or something then
-    our returned array would actually vary over those dimensions."""
-    return (Kx.diagonal()[np.newaxis, np.newaxis, :, np.newaxis] +
-            Ky.diagonal()[np.newaxis, np.newaxis, np.newaxis, :])
-
 @inmain_decorator()
 def plot(psi, output_log):
     if SHOW_PLOT:

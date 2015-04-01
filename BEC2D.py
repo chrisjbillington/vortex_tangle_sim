@@ -618,7 +618,7 @@ class Simulator2D(object):
                     # it can evaluate on the edges of the border
                     # elements first, before doing MPI transport, so that we
                     # can cater to high latency by doing useful work during
-                    # the transport
+                    # the transport:
                     self.compute_H(t, psi, H,
                                    boundary_element_slices=BOUNDARY_ELEMENT_EDGES,
                                    internal_element_slices=INTERIOR_ELEMENT_EDGES,
