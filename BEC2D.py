@@ -38,7 +38,7 @@ INTERIOR = np.s_[1:-1]
 ALL_BUT_FIRST = np.s_[1:]
 ALL_BUT_LAST = np.s_[:-1]
 
-# Each of the following is (x_elements, y_elements, x_points, y_points)
+# Each of the following is (components, x_elements, y_elements, x_points, y_points)
 ALL_ELEMENTS_AND_POINTS = (ALL, ALL, ALL, ALL)
 LEFT_BOUNDARY = (FIRST, ALL, FIRST, ALL) # The points on the left edge of the left boundary element
 RIGHT_BOUNDARY = (LAST, ALL, LAST, ALL) # The points on the right edge of the right boundary element
@@ -50,6 +50,8 @@ LEFT_INTERIOR_EDGEPOINTS = (ALL_BUT_FIRST, ALL, FIRST, ALL) # All points on the 
 RIGHT_INTERIOR_EDGEPOINTS = (ALL_BUT_LAST, ALL, LAST, ALL) # All points on the right edge of a non-border element
 BOTTOM_INTERIOR_EDGEPOINTS = (ALL, ALL_BUT_FIRST, ALL, FIRST) # All points on the bottom edge of a non-border element
 TOP_INTERIOR_EDGEPOINTS = (ALL, ALL_BUT_LAST, ALL, LAST) # All points on the top edge of a non-border element
+# All but the last points in the x and y directions, so that we don't double count them when summing.
+DONT_DOUBLE_COUNT_EDGES = (ALL, ALL, ALL, ALL_BUT_LAST, ALL_BUT_LAST)
 
 def get_factors(n):
     """return all the factors of n"""
@@ -344,7 +346,11 @@ class Simulator2D(object):
     def global_dot(self, vec1, vec2):
         """"Dots two vectors and sums result over MPI processes"""
         # Don't double count edges
-        local_dot = np.vdot(vec1[:, :, :-1, :-1], vec2[:, :, :-1, :-1]).real
+        if vec1.shape != self.shape or vec2.shape != self.shape:
+            message = ('arguments must both have shape self.shape=%s, '%str(self.shape) +
+                       'but they are %s and %s'%(str(vec1.shape), str(vec2.shape)))
+            raise ValueError(message)
+        local_dot = np.vdot(vec1[DONT_DOUBLE_COUNT_EDGES], vec2[DONT_DOUBLE_COUNT_EDGES]).real
         local_dot = np.asarray(local_dot).reshape(1)
         result = np.zeros(1)
         self.MPI_comm.Allreduce(local_dot, result, MPI.SUM)
@@ -445,11 +451,11 @@ class Simulator2D(object):
         H_psi = K_psi + (U + U_nonlinear) * psi[0,:,:,:,:,0] # SCAFFOLDING: remove [0,:,:,:,:,0]
 
         # Total norm:
-        ncalc = self.global_dot(psi[0,:,:,:,:,0], psi[0,:,:,:,:,0]) # SCAFFOLDING: remove [0,:,:,:,:,0]
+        ncalc = self.compute_number(psi)
 
         # Expectation value and uncertainty of Hamiltonian gives the
         # expectation value and uncertainty of the chemical potential:
-        mucalc = self.global_dot(psi[0,:,:,:,:,0], H_psi)/ncalc # SCAFFOLDING: remove [0,:,:,:,:,0]
+        mucalc = self.global_dot(psi, H_psi.reshape(self.shape))/ncalc # SCAFFOLDING: remove reshape
         if uncertainty:
             mu2calc = self.global_dot(H_psi, H_psi)/ncalc
             var_mucalc = mu2calc - mucalc**2
