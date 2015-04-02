@@ -398,33 +398,37 @@ class FiniteElements2D(object):
         return grad2x, grad2y
 
     def interpolate_vector(self, psi, npts_x, npts_y):
-        """Takes a (n_elements_x, n_elements_y, Nx, Ny, 1, 1)
-        array psi of coefficients in the FEDVR basis and interpolates the
-        spatial function it represents to npts equally spaced points per
-        element. Returns arrays of the x and y points used and the values at
-        those points."""
+        """Takes a (n_components, n_elements_x, n_elements_y, Nx, Ny, 1) array
+        psi of coefficients in the FEDVR basis and interpolates the spatial
+        function it represents to npts_x and npts_y equally spaced points in
+        the x and y directions per element. Returns a (1, n_elements_x *
+        npts_x, 1) array for the x values of the interpolatation points, a (1,
+        1, n_elements_y * npts_y) for the y values of the interpolation
+        points, and an (n_components, n_elements_x
+        * npts_x, n_elements_y * npts_y) array for the interpolated values of
+        the vector at those points."""
         # The array of points within an element:
         x = np.linspace(0, self.element_width_x, npts_x, endpoint=False)
         y = np.linspace(0, self.element_width_y, npts_y, endpoint=False)
-        f = np.zeros((self.n_elements_x, self.n_elements_y, npts_x, npts_y), dtype=complex)
+        f = np.zeros((self.n_components, self.n_elements_x, self.n_elements_y, npts_x, npts_y), dtype=complex)
         for j, basis_function_x in enumerate(self.element_x.basis):
             for k, basis_function_y in enumerate(self.element_y.basis):
-                f += (psi[0, :, :, j, k, 0,  np.newaxis, np.newaxis] * # SCAFFOLDING: remove 0, 0,
+                f += (psi[:, :, :, j, k, 0, np.newaxis, np.newaxis] *
                       basis_function_x(x[:, np.newaxis]) *
                       basis_function_y(y[np.newaxis, :]))
 
-        x_all = (x + self.element_edges_x[:-1, np.newaxis]).flatten()
-        y_all = (y + self.element_edges_y[:-1, np.newaxis]).flatten()
+        x_all = (x + self.element_edges_x[:-1, np.newaxis]).reshape((1, self.n_elements_x * npts_x, 1))
+        y_all = (y + self.element_edges_y[:-1, np.newaxis]).reshape((1, 1, self.n_elements_y * npts_y))
         shape = (self.n_elements_x * npts_x, self.n_elements_y * npts_y)
-        f_reshaped = f.transpose(0, 2, 1, 3).reshape(shape)
+        f_reshaped = f.transpose(0, 1, 3, 2, 4).reshape(shape)
 
         return x_all, y_all, f_reshaped
 
     def make_vector(self, f):
-        """Takes a function of space f, and returns a (self.n_elements_x x
-        self.n_elements_y x self.Nx x self.Ny) array containing the coefficients
-        for that function's representation in the DVR basis in each
-        element."""
+        """Takes a function of space f, and returns a (n_components,
+        n_elements_x, n_elements_y, Nx, Ny, 1) array containing the
+        coefficients for that function's representation in the DVR basis in
+        each element."""
         psi = np.zeros(self.shape, dtype=complex)
         psi[:] = f(self.points_x, self.points_y)/self.values
         return psi
