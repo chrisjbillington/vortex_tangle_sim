@@ -110,12 +110,11 @@ class Simulator2D(object):
         self.shape = self.elements.shape
         self.global_shape = (self.n_elements_x_global, self.n_elements_y_global, self.Nx, self.Ny)
 
-        # Derivative operators, shapes (1, 1, Nx, Ny, 1, Nx) and (1, 1, Nx,
-        # Ny, 1, Ny):
+        # Derivative operators, shapes (Nx, Ny, 1, Nx) and (Nx, Ny, 1, Ny):
         self.gradx, self.grady = self.elements.derivative_operators()
         self.grad2x, self.grad2y = self.elements.second_derivative_operators()
-        self.grad2x = self.grad2x[0,0,:,1,0,:] # SCAFFOLDING
-        self.grad2y = self.grad2y[0,0,1,:,0,:] # SCAFFOLDING
+        self.grad2x = self.grad2x[:,1,:] # SCAFFOLDING, remove
+        self.grad2y = self.grad2y[1,:,:] # SCAFFOLDING, remove
 
         # Density operator. Is diagonal and so is represented as an (Nx, Ny)
         # array containing its diagonals:

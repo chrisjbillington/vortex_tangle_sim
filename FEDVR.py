@@ -349,49 +349,45 @@ class FiniteElements2D(object):
         return rho
 
     def derivative_operators(self):
-        """Returns a (1, 1, Nx, Ny, 1, Nx) array for the first derivative
-        operator on each element in the x direction, and a (1, 1, Nx, Ny, 1,
-        Ny) array for the first derivative operator on each element in the y
-        direction. The reason both have size Nx, Ny in the Nx and Ny
-        dimensions is that the x first derivative operator is halved on the y
-        edges of an element, and likewise for the y derivative operator. This
-        is so that when we sum vectors at edges of elements, we get the right
-        result. """
+        """Returns a (Nx, Ny, Nx) array for the first derivative operator
+        on each element in the x direction, and a (Nx, Ny, Ny) array for
+        the first derivative operator on each element in the y direction. The
+        reason both have size Nx, Ny in the Nx and Ny dimensions is that the x
+        first derivative operator is halved on the y edges of an element, and
+        likewise for the y derivative operator. This is so that when we sum
+        vectors at edges of elements, we get the right result. """
         gradx = self.element_x.second_derivative_operator()
         grady = self.element_y.second_derivative_operator()
-        gradx = gradx.reshape(1, 1, self.Nx, 1, 1, self.Nx)
-        grady = grady.reshape(1, 1, 1, self.Ny, 1, self.Ny)
+        gradx = gradx.reshape(self.Nx, 1, self.Nx)
+        grady = grady.reshape(1, self.Ny, self.Ny)
         y_envelope = np.ones(self.Ny)
         y_envelope[0] = y_envelope[-1] = 0.5
-        y_envelope.reshape((1, 1, 1, self.Ny, 1, 1))
         x_envelope = np.ones(self.Nx)
         x_envelope[0] = x_envelope[-1] = 0.5
-        x_envelope = x_envelope.reshape((1, 1, self.Nx, 1, 1, 1))
-        y_envelope = y_envelope.reshape((1, 1, 1, self.Ny, 1, 1))
+        x_envelope = x_envelope.reshape((self.Nx, 1, 1))
+        y_envelope = y_envelope.reshape((1, self.Ny, 1))
         gradx = gradx * y_envelope
         grady = grady * x_envelope
         return gradx, grady
 
     def second_derivative_operators(self):
-        """Returns a (1, 1, Nx, Ny, 1, Nx) array for the second derivative
-        operator on each element in the x direction, and a (1, 1, Nx, Ny, 1,
-        Ny) array for the second derivative operator on each element in the y
-        direction. The reason both have size Nx, Ny in the Nx and Ny
-        dimensions is that the x second derivative operator is halved on the y
-        edges of an element, and likewise for the y derivative operator. This
-        is so that when we sum vectors at edges of elements, we get the right
-        result. """
+        """Returns a (Nx, Ny, Nx) array for the second derivative operator
+        on each element in the x direction, and a (Nx, Ny, Ny) array for
+        the second derivative operator on each element in the y direction. The
+        reason both have size Nx, Ny in the Nx and Ny dimensions is that the x
+        second derivative operator is halved on the y edges of an element, and
+        likewise for the y derivative operator. This is so that when we sum
+        vectors at edges of elements, we get the right result. """
         grad2x = self.element_x.second_derivative_operator()
         grad2y = self.element_y.second_derivative_operator()
-        grad2x = grad2x.reshape(1, 1, self.Nx, 1, 1, self.Nx)
-        grad2y = grad2y.reshape(1, 1, 1, self.Ny, 1, self.Ny)
+        grad2x = grad2x.reshape(self.Nx, 1, self.Nx)
+        grad2y = grad2y.reshape(1, self.Ny, self.Ny)
         y_envelope = np.ones(self.Ny)
         y_envelope[0] = y_envelope[-1] = 0.5
-        y_envelope.reshape((1, 1, 1, self.Ny, 1, 1))
         x_envelope = np.ones(self.Nx)
         x_envelope[0] = x_envelope[-1] = 0.5
-        x_envelope = x_envelope.reshape((1, 1, self.Nx, 1, 1, 1))
-        y_envelope = y_envelope.reshape((1, 1, 1, self.Ny, 1, 1))
+        x_envelope = x_envelope.reshape((self.Nx, 1, 1))
+        y_envelope = y_envelope.reshape((1, self.Ny, 1))
         grad2x = grad2x * y_envelope
         grad2y = grad2y * x_envelope
         return grad2x, grad2y
