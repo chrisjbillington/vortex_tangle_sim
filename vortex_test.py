@@ -49,7 +49,6 @@ Kx = -hbar**2/(2*m) * simulator.grad2x
 Ky = -hbar**2/(2*m) * simulator.grad2y
 
 # The Harmonic trap at our gridpoints, shape (n_components, n_elements_x, n_elements_y, Nx, Ny, 1):
-# SCAFFOLDING: remove reshape:
 V = 0.5*m*omega**2*(x**2 + y**2)
 
 def H(t, psi, *slices):

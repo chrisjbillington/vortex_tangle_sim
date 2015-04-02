@@ -39,17 +39,17 @@ ALL_BUT_FIRST = np.s_[1:]
 ALL_BUT_LAST = np.s_[:-1]
 
 # Each of the following is (components, x_elements, y_elements, x_points, y_points)
-ALL_ELEMENTS_AND_POINTS = (ALL, ALL, ALL, ALL)
-LEFT_BOUNDARY = (FIRST, ALL, FIRST, ALL) # The points on the left edge of the left boundary element
-RIGHT_BOUNDARY = (LAST, ALL, LAST, ALL) # The points on the right edge of the right boundary element
-BOTTOM_BOUNDARY = (ALL, FIRST, ALL, FIRST) # The points on the bottom edge of the bottom boundary element
-TOP_BOUNDARY = (ALL, LAST, ALL, LAST) # The points on the top edge of the top boundary element
-INTERIOR_ELEMENTS = (INTERIOR, INTERIOR, ALL, ALL) # All points in all elements that are not boundary elements
-INTERIOR_POINTS = (ALL, ALL, INTERIOR, INTERIOR) # Points that are not edgepoints in all elements
-LEFT_INTERIOR_EDGEPOINTS = (ALL_BUT_FIRST, ALL, FIRST, ALL) # All points on the left edge of a non-border element
-RIGHT_INTERIOR_EDGEPOINTS = (ALL_BUT_LAST, ALL, LAST, ALL) # All points on the right edge of a non-border element
-BOTTOM_INTERIOR_EDGEPOINTS = (ALL, ALL_BUT_FIRST, ALL, FIRST) # All points on the bottom edge of a non-border element
-TOP_INTERIOR_EDGEPOINTS = (ALL, ALL_BUT_LAST, ALL, LAST) # All points on the top edge of a non-border element
+ALL_ELEMENTS_AND_POINTS = (ALL, ALL, ALL, ALL, ALL)
+LEFT_BOUNDARY = (ALL, FIRST, ALL, FIRST, ALL) # The points on the left edge of the left boundary element
+RIGHT_BOUNDARY = (ALL, LAST, ALL, LAST, ALL) # The points on the right edge of the right boundary element
+BOTTOM_BOUNDARY = (ALL, ALL, FIRST, ALL, FIRST) # The points on the bottom edge of the bottom boundary element
+TOP_BOUNDARY = (ALL, ALL, LAST, ALL, LAST) # The points on the top edge of the top boundary element
+INTERIOR_ELEMENTS = (ALL, INTERIOR, INTERIOR, ALL, ALL) # All points in all elements that are not boundary elements
+INTERIOR_POINTS = (ALL, ALL, ALL, INTERIOR, INTERIOR) # Points that are not edgepoints in all elements
+LEFT_INTERIOR_EDGEPOINTS = (ALL, ALL_BUT_FIRST, ALL, FIRST, ALL) # All points on the left edge of a non-border element
+RIGHT_INTERIOR_EDGEPOINTS = (ALL, ALL_BUT_LAST, ALL, LAST, ALL) # All points on the right edge of a non-border element
+BOTTOM_INTERIOR_EDGEPOINTS = (ALL, ALL, ALL_BUT_FIRST, ALL, FIRST) # All points on the bottom edge of a non-border element
+TOP_INTERIOR_EDGEPOINTS = (ALL, ALL, ALL_BUT_LAST, ALL, LAST) # All points on the top edge of a non-border element
 # All but the last points in the x and y directions, so that we don't double count them when summing.
 DONT_DOUBLE_COUNT_EDGES = (ALL, ALL, ALL, ALL_BUT_LAST, ALL_BUT_LAST)
 
@@ -174,20 +174,20 @@ class Simulator2D(object):
         # These are for indexing all edges of all boundary elements. The below
         # four sets of slices used in succession cover the edges of boundary
         # elements exactly once:
-        self.BOUNDARY_ELEMENTS_X_EDGE_POINTS_X = (BOUNDARY_ELEMENTS_X, ALL, EDGE_POINTS_X, ALL)
-        self.BOUNDARY_ELEMENTS_Y_EDGE_POINTS_X = (INTERIOR, BOUNDARY_ELEMENTS_Y, EDGE_POINTS_X, ALL)
-        self.BOUNDARY_ELEMENTS_X_EDGE_POINTS_Y = (BOUNDARY_ELEMENTS_X, ALL, INTERIOR, EDGE_POINTS_Y)
-        self.BOUNDARY_ELEMENTS_Y_EDGE_POINTS_Y = (INTERIOR, BOUNDARY_ELEMENTS_Y, INTERIOR, EDGE_POINTS_Y)
+        self.BOUNDARY_ELEMENTS_X_EDGE_POINTS_X = (ALL, BOUNDARY_ELEMENTS_X, ALL, EDGE_POINTS_X, ALL)
+        self.BOUNDARY_ELEMENTS_Y_EDGE_POINTS_X = (ALL, INTERIOR, BOUNDARY_ELEMENTS_Y, EDGE_POINTS_X, ALL)
+        self.BOUNDARY_ELEMENTS_X_EDGE_POINTS_Y = (ALL, BOUNDARY_ELEMENTS_X, ALL, INTERIOR, EDGE_POINTS_Y)
+        self.BOUNDARY_ELEMENTS_Y_EDGE_POINTS_Y = (ALL, INTERIOR, BOUNDARY_ELEMENTS_Y, INTERIOR, EDGE_POINTS_Y)
 
         # These are for indexing all edges of non-boundary elements. Used in
         # succession they cover the edges of these elements exactly once:
-        self.INTERIOR_ELEMENTS_EDGE_POINTS_X = (INTERIOR, INTERIOR, EDGE_POINTS_X, ALL)
-        self.INTERIOR_ELEMENTS_EDGE_POINTS_Y = (INTERIOR, INTERIOR, INTERIOR, EDGE_POINTS_Y)
+        self.INTERIOR_ELEMENTS_EDGE_POINTS_X = (ALL, INTERIOR, INTERIOR, EDGE_POINTS_X, ALL)
+        self.INTERIOR_ELEMENTS_EDGE_POINTS_Y = (ALL, INTERIOR, INTERIOR, INTERIOR, EDGE_POINTS_Y)
 
         # These are for indexing all points of boundary elements. Used in
         # succession they cover the these elements exactly once:
-        self.BOUNDARY_ELEMENTS_X_ALL_POINTS = (BOUNDARY_ELEMENTS_X, ALL, ALL, ALL)
-        self.BOUNDARY_ELEMENTS_Y_ALL_POINTS = (INTERIOR, BOUNDARY_ELEMENTS_Y, ALL, ALL)
+        self.BOUNDARY_ELEMENTS_X_ALL_POINTS = (ALL, BOUNDARY_ELEMENTS_X, ALL, ALL, ALL)
+        self.BOUNDARY_ELEMENTS_Y_ALL_POINTS = (ALL, INTERIOR, BOUNDARY_ELEMENTS_Y, ALL, ALL)
 
     def _setup_MPI_grid(self):
         """Split space up according to the number of MPI tasks. Set instance
@@ -316,10 +316,10 @@ class Simulator2D(object):
     def MPI_send_border_kinetic(self, Kx_psi, Ky_psi):
         """Start an asynchronous MPI send to all adjacent MPI processes,
         sending them the values of H_nondiag_psi on the borders"""
-        self.MPI_left_kinetic_send_buffer[:] = Kx_psi[LEFT_BOUNDARY].reshape(self.n_elements_y * self.Ny)
-        self.MPI_right_kinetic_send_buffer[:] = Kx_psi[RIGHT_BOUNDARY].reshape(self.n_elements_y * self.Ny)
-        self.MPI_bottom_kinetic_send_buffer[:] = Ky_psi[BOTTOM_BOUNDARY].reshape(self.n_elements_x * self.Nx)
-        self.MPI_top_kinetic_send_buffer[:] = Ky_psi[TOP_BOUNDARY].reshape(self.n_elements_x * self.Nx)
+        self.MPI_left_kinetic_send_buffer[:] = Kx_psi[LEFT_BOUNDARY[1:]].reshape(self.n_elements_y * self.Ny) # SCAFFOLDING: remove [1:]
+        self.MPI_right_kinetic_send_buffer[:] = Kx_psi[RIGHT_BOUNDARY[1:]].reshape(self.n_elements_y * self.Ny) # SCAFFOLDING: remove [1:]
+        self.MPI_bottom_kinetic_send_buffer[:] = Ky_psi[BOTTOM_BOUNDARY[1:]].reshape(self.n_elements_x * self.Nx) # SCAFFOLDING: remove [1:]
+        self.MPI_top_kinetic_send_buffer[:] = Ky_psi[TOP_BOUNDARY[1:]].reshape(self.n_elements_x * self.Nx) # SCAFFOLDING: remove [1:]
         MPI.Prequest.Startall(self.MPI_kinetic_requests)
 
     def MPI_receive_border_kinetic(self, Kx_psi, Ky_psi):
@@ -338,10 +338,10 @@ class Simulator2D(object):
             right_data = right_data.real
             bottom_data = bottom_data.real
             top_data = top_data.real
-        Kx_psi[LEFT_BOUNDARY] += left_data
-        Kx_psi[RIGHT_BOUNDARY] += right_data
-        Ky_psi[BOTTOM_BOUNDARY] += bottom_data
-        Ky_psi[TOP_BOUNDARY] += top_data
+        Kx_psi[LEFT_BOUNDARY[1:]] += left_data # SCAFFOLDING: remove [1:]
+        Kx_psi[RIGHT_BOUNDARY[1:]] += right_data # SCAFFOLDING: remove [1:]
+        Ky_psi[BOTTOM_BOUNDARY[1:]] += bottom_data # SCAFFOLDING: remove [1:]
+        Ky_psi[TOP_BOUNDARY[1:]] += top_data # SCAFFOLDING: remove [1:]
 
     def global_dot(self, vec1, vec2):
         """"Dots two vectors and sums result over MPI processes"""
@@ -408,8 +408,7 @@ class Simulator2D(object):
 
         # Evaluate H_psi at the boundary element slices, if any:
         for slices in boundary_element_slices:
-            x_elements, y_elements, x_points, y_points = slices
-            slices = (FIRST,) + slices # SCAFFOLDING, remove
+            components, x_elements, y_elements, x_points, y_points = slices
             a, b, c, d = H(t, psi, *slices) # SCAFFOLDING, remove inetermediate varaibles and reshapes
             c = c.reshape(U[slices[1:]].shape)
             d = d.reshape(U_nonlinear[slices[1:]].shape)
@@ -422,8 +421,7 @@ class Simulator2D(object):
 
         # Now evaluate H_psi at the internal element slices:
         for slices in internal_element_slices:
-            x_elements, y_elements, x_points, y_points = slices
-            slices = (FIRST,) + slices # SCAFFOLDING, remove
+            component, x_elements, y_elements, x_points, y_points = slices
             a, b, c, d = H(t, psi, *slices) # SCAFFOLDING, remove inetermediate varaibles and reshapes
             c = c.reshape(U[slices[1:]].shape)
             d = d.reshape(U_nonlinear[slices[1:]].shape)
@@ -433,20 +431,20 @@ class Simulator2D(object):
 
         if sum_at_edges:
             # Add contributions to Kx_psi and Ky_psi at edges shared by interior elements.
-            total_at_x_edges = Kx_psi[LEFT_INTERIOR_EDGEPOINTS] + Kx_psi[RIGHT_INTERIOR_EDGEPOINTS]
-            Kx_psi[LEFT_INTERIOR_EDGEPOINTS] = Kx_psi[RIGHT_INTERIOR_EDGEPOINTS] = total_at_x_edges
-            total_at_y_edges = Ky_psi[BOTTOM_INTERIOR_EDGEPOINTS] + Ky_psi[TOP_INTERIOR_EDGEPOINTS]
-            Ky_psi[BOTTOM_INTERIOR_EDGEPOINTS] = Ky_psi[TOP_INTERIOR_EDGEPOINTS] = total_at_y_edges
+            total_at_x_edges = Kx_psi[LEFT_INTERIOR_EDGEPOINTS[1:]] + Kx_psi[RIGHT_INTERIOR_EDGEPOINTS[1:]] # SCAFFOLDING: remove [1:]
+            Kx_psi[LEFT_INTERIOR_EDGEPOINTS[1:]] = Kx_psi[RIGHT_INTERIOR_EDGEPOINTS[1:]] = total_at_x_edges # SCAFFOLDING: remove [1:]
+            total_at_y_edges = Ky_psi[BOTTOM_INTERIOR_EDGEPOINTS[1:]] + Ky_psi[TOP_INTERIOR_EDGEPOINTS[1:]] # SCAFFOLDING: remove [1:]
+            Ky_psi[BOTTOM_INTERIOR_EDGEPOINTS[1:]] = Ky_psi[TOP_INTERIOR_EDGEPOINTS[1:]] = total_at_y_edges # SCAFFOLDING: remove [1:]
 
         # Add contributions to K_psi from adjacent MPI tasks, if any were computed:
         if boundary_element_slices and sum_at_edges:
             self.MPI_receive_border_kinetic(Kx_psi, Ky_psi)
 
         for slices in boundary_element_slices:
-            K_psi[slices] = Kx_psi[slices] + Ky_psi[slices]
+            K_psi[slices[1:]] = Kx_psi[slices[1:]] + Ky_psi[slices[1:]] # SCAFFOLDING: remove [1:]
         
         for slices in internal_element_slices:
-            K_psi[slices] = Kx_psi[slices] + Ky_psi[slices]
+            K_psi[slices[1:]] = Kx_psi[slices[1:]] + Ky_psi[slices[1:]]
 
         return K_psi, U, U_nonlinear
 
@@ -537,8 +535,7 @@ class Simulator2D(object):
 
         psi = np.array(psi_guess, dtype=complex)
 
-        slices = (FIRST,) + ALL_ELEMENTS_AND_POINTS # SCAFFOLDING, remove
-        Kx, Ky, U, U_nonlinear = H(t, psi, *slices)
+        Kx, Ky, U, U_nonlinear = H(t, psi, *ALL_ELEMENTS_AND_POINTS)
         U = U.reshape(self.n_elements_x, self.n_elements_y, self.Nx, self.Ny) # SCAFFOLDING, remove
         U_nonlinear = U_nonlinear.reshape(self.n_elements_x, self.n_elements_y, self.Nx, self.Ny) # SCAFFOLDING, remove
         # Get the diagonals of the nondiagonal part of the Hamiltonian, shape (1, 1,
@@ -578,14 +575,14 @@ class Simulator2D(object):
         # two dimensions:
         EDGE_POINTS = np.zeros((self.Nx, self.Ny), dtype=bool)
         EDGE_POINTS[FIRST] = EDGE_POINTS[LAST] = EDGE_POINTS[:, FIRST] = EDGE_POINTS[:, LAST] = True
-        EDGE_POINT_SLICES = (ALL, ALL, EDGE_POINTS)
+        EDGE_POINT_SLICES = (ALL, ALL, ALL, EDGE_POINTS)
         point_selections.append(EDGE_POINT_SLICES)
         # These indicate to do internal points:
         for j in range(1, self.Nx-1):
             for k in range(1, self.Ny-1):
                 # A set of slices selecting a single non-edge point in every
-                # element .
-                slices = (ALL, ALL, np.s_[j:j+1], np.s_[k:k+1])
+                # element.
+                slices = (ALL, ALL, ALL, np.s_[j:j+1], np.s_[k:k+1])
                 point_selections.append(slices)
 
         if output_group is not None:
@@ -650,23 +647,23 @@ class Simulator2D(object):
                                    outarrays=(Kx_psi, Ky_psi, K_psi, U, U_nonlinear))
 
                 # Diagonals of the total Hamiltonian operator at the DVR point(s):
-                H_diags[slices] = K_diags[slices] + U[slices] + U_nonlinear[slices]
+                H_diags[slices[1:]] = K_diags[slices[1:]] + U[slices[1:]] + U_nonlinear[slices[1:]] # SCAFFOLDING: remove [1:]
 
                 # Hamiltonian with diagonals subtracted off, operating on psi at the DVR point(s):
-                H_hollow_psi[slices] = K_psi[slices] - K_diags[slices] * psi[0,:,:,:,:,0][slices] # SCAFFOLDING: remove [0,:,:,:,:,0]
+                H_hollow_psi[slices[1:]] = K_psi[slices[1:]] - K_diags[slices[1:]] * psi[0,:,:,:,:,0][slices[1:]] # SCAFFOLDING: remove [0,:,:,:,:,0] and [1:]
 
                 # The Gauss-Seidel prediction for the new psi at the DVR point(s):
-                psi_new_GS[slices] = (mu * psi[0,:,:,:,:,0][slices] - H_hollow_psi[slices])/H_diags[slices] # SCAFFOLDING: remove [0,:,:,:,:,0]
+                psi_new_GS[slices[1:]] = (mu * psi[0,:,:,:,:,0][slices[1:]] - H_hollow_psi[slices[1:]])/H_diags[slices[1:]] # SCAFFOLDING: remove [0,:,:,:,:,0] and [1:]
 
                 # SCAFFOLDING: remove a, b, c = slices business, remove [0,:,:,:,:,0]
-                if len(slices) == 3:
-                    a,b,c = slices
+                if len(slices) == 4:
+                    a,b,c,d = slices
                     # Update psi at the DVR point(s) with overrelaxation:
-                    psi[0:1, a, b, c,0] += relaxation_parameter * (psi_new_GS[slices] - psi[0,:,:,:,:,0][slices])
+                    psi[a, b, c, d, 0] += relaxation_parameter * (psi_new_GS[slices[1:]] - psi[0,:,:,:,:,0][slices[1:]])
                 else:
-                    a,b,c, d = slices
+                    a ,b, c, d, e = slices
                     # Update psi at the DVR point(s) with overrelaxation:
-                    psi[0:1, a, b, c, d, 0] += relaxation_parameter * (psi_new_GS[slices] - psi[0,:,:,:,:,0][slices])
+                    psi[a, b, c, d, e, 0] += relaxation_parameter * (psi_new_GS[slices[1:]] - psi[0,:,:,:,:,0][slices[1:]])
 
             if not i % output_interval:
                 convergence_calc = do_output()
