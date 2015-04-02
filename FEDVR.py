@@ -318,28 +318,28 @@ class FiniteElements2D(object):
         # operators on one of our dimensions, which have size > 1 in that
         # dimension, have the same rank as vectors, so that we can say,
         # multiply them easily.
-        self.shape = (self.n_elements_x, self.n_elements_y, self.Nx, self.Ny, self.n_components, 1)
+        self.shape = (self.n_components, self.n_elements_x, self.n_elements_y, self.Nx, self.Ny, 1)
 
-        # construct a (n_elements_x, 1, Nx, 1, 1, 1) array for the quadrature points in
+        # construct a (1, n_elements_x, 1, Nx, 1, 1) array for the quadrature points in
         # the x direction:
         self.points_x = self.element_x.points + self.element_edges_x[:-1, np.newaxis]
-        self.points_x = self.points_x.reshape((n_elements_x, 1, Nx, 1, 1, 1))
-        # The same for the y direction, shape (1, n_elements_y, 1, Ny, 1, 1):
+        self.points_x = self.points_x.reshape((1, n_elements_x, 1, Nx, 1, 1))
+        # The same for the y direction, shape (1, 1, n_elements_y, 1, Ny, 1):
         self.points_y = self.element_y.points + self.element_edges_y[:-1, np.newaxis]
-        self.points_y = self.points_y.reshape((1, n_elements_y, 1, Ny, 1, 1))
+        self.points_y = self.points_y.reshape((1, 1, n_elements_y, 1, Ny, 1))
 
         # The product of the weights over the 2D space; shape (1, 1, Nx, Ny, 1, 1):
         self.weights = np.outer(self.element_x.weights, self.element_y.weights)
-        self.weights = self.weights.reshape((1, 1, Nx, Ny, 1, 1))
+        self.weights = self.weights.reshape((1, 1, 1, Nx, Ny, 1))
 
         # The values of each DVR basis function at its point; shape (1, 1, Nx, Ny, 1, 1):
         self.values = 1/np.sqrt(self.weights)
         # The basis functions at the edges have different normalisation, they
         # are 1/sqrt(2*w) rather than just 1/sqrt(w):
-        self.values[:, :, 0, :] /= np.sqrt(2)
-        self.values[:, :, -1, :] /= np.sqrt(2)
-        self.values[:, :, :, 0] /= np.sqrt(2)
-        self.values[:, :, :, -1] /= np.sqrt(2)
+        self.values[:, :, :, 0, :] /= np.sqrt(2)
+        self.values[:, :, :, -1, :] /= np.sqrt(2)
+        self.values[:, :, :, :, 0] /= np.sqrt(2)
+        self.values[:, :, :, :, -1] /= np.sqrt(2)
 
     def density_operator(self):
         """Returns a 1D array of size self.N representing the diagonals of the
@@ -409,7 +409,7 @@ class FiniteElements2D(object):
         f = np.zeros((self.n_elements_x, self.n_elements_y, npts_x, npts_y), dtype=complex)
         for j, basis_function_x in enumerate(self.element_x.basis):
             for k, basis_function_y in enumerate(self.element_y.basis):
-                f += (psi[:, :, j, k, 0, 0, np.newaxis, np.newaxis] * # SCAFFOLDING: remove 0, 0,
+                f += (psi[0, :, :, j, k, 0,  np.newaxis, np.newaxis] * # SCAFFOLDING: remove 0, 0,
                       basis_function_x(x[:, np.newaxis]) *
                       basis_function_y(y[np.newaxis, :]))
 

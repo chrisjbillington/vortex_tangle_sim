@@ -376,12 +376,12 @@ class Simulator2D(object):
 
         # optimisation, don't create arrays if the user has provided them:
         if outarrays is None:
-            # SCAFFOLDING: remove [:-2]
-            Kx_psi = np.empty(psi.shape[:-2], dtype=psi.dtype)
-            Ky_psi = np.empty(psi.shape[:-2], dtype=psi.dtype)
-            K_psi = np.empty(psi.shape[:-2], dtype=psi.dtype)
-            U = np.empty(psi.shape[:-2], dtype=psi.dtype)
-            U_nonlinear = np.empty(psi.shape[:-2], dtype=psi.dtype)
+            # SCAFFOLDING: remove [1:-1]
+            Kx_psi = np.empty(psi.shape[1:-1], dtype=psi.dtype)
+            Ky_psi = np.empty(psi.shape[1:-1], dtype=psi.dtype)
+            K_psi = np.empty(psi.shape[1:-1], dtype=psi.dtype)
+            U = np.empty(psi.shape[1:-1], dtype=psi.dtype)
+            U_nonlinear = np.empty(psi.shape[1:-1], dtype=psi.dtype)
         else:
             Kx_psi, Ky_psi, K_psi, U, U_nonlinear = outarrays
 
@@ -403,9 +403,9 @@ class Simulator2D(object):
         # Evaluate H_psi at the boundary element slices, if any:
         for slices in boundary_element_slices:
             x_elements, y_elements, x_points, y_points = slices
-            Kx, Ky, U[slices], U_nonlinear[slices] = H(t, psi[:,:,:,:,0,0], *slices) # SCAFFOLDING: remove [:,:,:,:,0,0]
-            Kx_psi[slices] = np.einsum('ij,xyjl->xyil', Kx,  psi[x_elements, y_elements, :, y_points, 0, 0]) # SCAFFOLDING: , 0, 0
-            Ky_psi[slices] = np.einsum('kl,xyjl->xyjk', Ky,  psi[x_elements, y_elements, x_points, :, 0, 0]) # SCAFFOLDING: , 0, 0
+            Kx, Ky, U[slices], U_nonlinear[slices] = H(t, psi[0,:,:,:,:,0], *slices) # SCAFFOLDING: remove [0,:,:,:,:,0]
+            Kx_psi[slices] = np.einsum('ij,xyjl->xyil', Kx,  psi[0, x_elements, y_elements, :, y_points, 0]) # SCAFFOLDING: , 0, 0
+            Ky_psi[slices] = np.einsum('kl,xyjl->xyjk', Ky,  psi[0, x_elements, y_elements, x_points, :, 0]) # SCAFFOLDING: , 0, 0
         if boundary_element_slices and sum_at_edges:
             # Send values on the border to adjacent MPI tasks:
             self.MPI_send_border_kinetic(Kx_psi, Ky_psi)
@@ -413,9 +413,9 @@ class Simulator2D(object):
         # Now evaluate H_psi at the internal element slices:
         for slices in internal_element_slices:
             x_elements, y_elements, x_points, y_points = slices
-            Kx, Ky, U[slices], U_nonlinear[slices] = H(t, psi[:,:,:,:,0,0], *slices) # SCAFFOLDING: remove [:,:,:,:,0,0]
-            Kx_psi[slices] = np.einsum('ij,xyjl->xyil', Kx,  psi[x_elements, y_elements, :, y_points, 0, 0]) # SCAFFOLDING: , 0, 0
-            Ky_psi[slices] = np.einsum('kl,xyjl->xyjk', Ky,  psi[x_elements, y_elements, x_points, :, 0, 0]) # SCAFFOLDING: , 0, 0
+            Kx, Ky, U[slices], U_nonlinear[slices] = H(t, psi[0,:,:,:,:,0], *slices) # SCAFFOLDING: remove [0,:,:,:,:,0]
+            Kx_psi[slices] = np.einsum('ij,xyjl->xyil', Kx,  psi[0, x_elements, y_elements, :, y_points, 0]) # SCAFFOLDING: , 0, 0
+            Ky_psi[slices] = np.einsum('kl,xyjl->xyjk', Ky,  psi[0, x_elements, y_elements, x_points, :, 0]) # SCAFFOLDING: , 0, 0
 
         if sum_at_edges:
             # Add contributions to Kx_psi and Ky_psi at edges shared by interior elements.
@@ -424,11 +424,9 @@ class Simulator2D(object):
             total_at_y_edges = Ky_psi[BOTTOM_INTERIOR_EDGEPOINTS] + Ky_psi[TOP_INTERIOR_EDGEPOINTS]
             Ky_psi[BOTTOM_INTERIOR_EDGEPOINTS] = Ky_psi[TOP_INTERIOR_EDGEPOINTS] = total_at_y_edges
 
-        
         # Add contributions to K_psi from adjacent MPI tasks, if any were computed:
         if boundary_element_slices and sum_at_edges:
             self.MPI_receive_border_kinetic(Kx_psi, Ky_psi)
-
 
         for slices in boundary_element_slices:
             K_psi[slices] = Kx_psi[slices] + Ky_psi[slices]
@@ -444,14 +442,14 @@ class Simulator2D(object):
 
         # Total Hamiltonian operator operating on psi:
         K_psi, U, U_nonlinear = self.compute_H(t, psi, H)
-        H_psi = K_psi + (U + U_nonlinear) * psi[:,:,:,:,0,0] # SCAFFOLDING: remove [:,:,:,:,0,0]
+        H_psi = K_psi + (U + U_nonlinear) * psi[0,:,:,:,:,0] # SCAFFOLDING: remove [0,:,:,:,:,0]
 
         # Total norm:
-        ncalc = self.global_dot(psi, psi)
+        ncalc = self.global_dot(psi[0,:,:,:,:,0], psi[0,:,:,:,:,0]) # SCAFFOLDING: remove [0,:,:,:,:,0]
 
         # Expectation value and uncertainty of Hamiltonian gives the
         # expectation value and uncertainty of the chemical potential:
-        mucalc = self.global_dot(psi, H_psi)/ncalc
+        mucalc = self.global_dot(psi[0,:,:,:,:,0], H_psi)/ncalc # SCAFFOLDING: remove [0,:,:,:,:,0]
         if uncertainty:
             mu2calc = self.global_dot(H_psi, H_psi)/ncalc
             var_mucalc = mu2calc - mucalc**2
@@ -525,7 +523,7 @@ class Simulator2D(object):
 
         psi = np.array(psi_guess, dtype=complex)
 
-        Kx, Ky, U, U_nonlinear = H(t, psi[:,:,:,:,0,0], *ALL_ELEMENTS_AND_POINTS) # SCAFFOLDING: remove [:,:,:,:,0,0]
+        Kx, Ky, U, U_nonlinear = H(t, psi[0,:,:,:,:,0], *ALL_ELEMENTS_AND_POINTS) # SCAFFOLDING: remove [0,:,:,:,:,0]
         # Get the diagonals of the nondiagonal part of the Hamiltonian, shape (1, 1,
         # Nx, Ny) if spatially homogenous, otherwise first two dimensions can have
         # sizes n_elements_x or n_elements_y:
@@ -542,12 +540,12 @@ class Simulator2D(object):
 
 
         # Empty arrays for re-using each step:
-        Kx_psi = np.zeros(psi.shape[:-2], dtype=complex) # SCAFFOLDING: remove [:-2]
-        Ky_psi = np.zeros(psi.shape[:-2], dtype=complex) # SCAFFOLDING: remove [:-2]
-        K_psi = np.zeros(psi.shape[:-2], dtype=complex) # SCAFFOLDING: remove [:-2]
-        H_diags = np.zeros(psi.shape[:-2], dtype=complex) # SCAFFOLDING: remove [:-2]
-        H_hollow_psi = np.zeros(psi.shape[:-2], dtype=complex) # SCAFFOLDING: remove [:-2]
-        psi_new_GS = np.zeros(psi.shape[:-2], dtype=complex) # SCAFFOLDING: remove [:-2]
+        Kx_psi = np.zeros(psi.shape[1:-1], dtype=complex) # SCAFFOLDING: remove [1:-1]
+        Ky_psi = np.zeros(psi.shape[1:-1], dtype=complex) # SCAFFOLDING: remove [1:-1]
+        K_psi = np.zeros(psi.shape[1:-1], dtype=complex) # SCAFFOLDING: remove [1:-1]
+        H_diags = np.zeros(psi.shape[1:-1], dtype=complex) # SCAFFOLDING: remove [1:-1]
+        H_hollow_psi = np.zeros(psi.shape[1:-1], dtype=complex) # SCAFFOLDING: remove [1:-1]
+        psi_new_GS = np.zeros(psi.shape[1:-1], dtype=complex) # SCAFFOLDING: remove [1:-1]
 
         # All the slices for covering the edges of the boundary elements and internal elements:
         BOUNDARY_ELEMENT_EDGES = (self.BOUNDARY_ELEMENTS_X_EDGE_POINTS_X, self.BOUNDARY_ELEMENTS_Y_EDGE_POINTS_X,
@@ -638,20 +636,20 @@ class Simulator2D(object):
                 H_diags[slices] = K_diags[slices] + U[slices] + U_nonlinear[slices]
 
                 # Hamiltonian with diagonals subtracted off, operating on psi at the DVR point(s):
-                H_hollow_psi[slices] = K_psi[slices] - K_diags[slices] * psi[:,:,:,:,0,0][slices] # SCAFFOLDING: remove [:,:,:,:,0,0]
+                H_hollow_psi[slices] = K_psi[slices] - K_diags[slices] * psi[0,:,:,:,:,0][slices] # SCAFFOLDING: remove [0,:,:,:,:,0]
 
                 # The Gauss-Seidel prediction for the new psi at the DVR point(s):
-                psi_new_GS[slices] = (mu * psi[:,:,:,:,0,0][slices] - H_hollow_psi[slices])/H_diags[slices] # SCAFFOLDING: remove [:,:,:,:,0,0]
+                psi_new_GS[slices] = (mu * psi[0,:,:,:,:,0][slices] - H_hollow_psi[slices])/H_diags[slices] # SCAFFOLDING: remove [0,:,:,:,:,0]
 
-                # SCAFFOLDING: remove a, b, c = slices business, remove [:,:,:,:,0,0]
+                # SCAFFOLDING: remove a, b, c = slices business, remove [0,:,:,:,:,0]
                 if len(slices) == 3:
                     a,b,c = slices
                     # Update psi at the DVR point(s) with overrelaxation:
-                    psi[a,b,c,0,0] += relaxation_parameter * (psi_new_GS[slices] - psi[:,:,:,:,0,0][slices])
+                    psi[0:1, a, b, c,0] += relaxation_parameter * (psi_new_GS[slices] - psi[0,:,:,:,:,0][slices])
                 else:
                     a,b,c, d = slices
                     # Update psi at the DVR point(s) with overrelaxation:
-                    psi[a,b,c,d, 0,0] += relaxation_parameter * (psi_new_GS[slices] - psi[:,:,:,:,0,0][slices])
+                    psi[0:1, a, b, c, d, 0] += relaxation_parameter * (psi_new_GS[slices] - psi[0,:,:,:,:,0][slices])
 
             if not i % output_interval:
                 convergence_calc = do_output()
@@ -785,10 +783,10 @@ class Simulator2D(object):
             end_y = start_y + self.n_elements_y
 
             output_row = self.output_row.setdefault(output_group, 0)
-            psi_dataset.resize((output_row + 1,) + psi.shape[:-2]) # SCAFFOLDING: remove [:-2]
+            psi_dataset.resize((output_row + 1,) + psi.shape[1:-1]) # SCAFFOLDING: remove [1:-1]
             output_log_dataset.resize((output_row + 1,))
 
-            psi_dataset[output_row, start_x:end_x, start_y:end_y, :, :] = psi[:,:,:,:,0,0] # SCAFFOLDING: remove [:,:,:,:,0,0]
+            psi_dataset[output_row, start_x:end_x, start_y:end_y, :, :] = psi[0,:,:,:,:,0] # SCAFFOLDING: remove [0,:,:,:,:,0]
             output_log_dataset[output_row] = output_log
 
         self.output_row[output_group] += 1
