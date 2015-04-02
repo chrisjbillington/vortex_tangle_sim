@@ -409,9 +409,13 @@ class Simulator2D(object):
         # Evaluate H_psi at the boundary element slices, if any:
         for slices in boundary_element_slices:
             x_elements, y_elements, x_points, y_points = slices
-            Kx, Ky, U[slices], U_nonlinear[slices] = H(t, psi[0,:,:,:,:,0], *slices) # SCAFFOLDING: remove [0,:,:,:,:,0]
-            Kx_psi[slices] = np.einsum('ij,xyjl->xyil', Kx,  psi[0, x_elements, y_elements, :, y_points, 0]) # SCAFFOLDING: , 0, 0
-            Ky_psi[slices] = np.einsum('kl,xyjl->xyjk', Ky,  psi[0, x_elements, y_elements, x_points, :, 0]) # SCAFFOLDING: , 0, 0
+            slices = (FIRST,) + slices # SCAFFOLDING, remove
+            a, b, c, d = H(t, psi, *slices) # SCAFFOLDING, remove inetermediate varaibles and reshapes
+            c = c.reshape(U[slices[1:]].shape)
+            d = d.reshape(U_nonlinear[slices[1:]].shape)
+            Kx, Ky, U[slices[1:]], U_nonlinear[slices[1:]] = a, b, c, d # SCAFFOLDING, remove [1:]
+            Kx_psi[slices[1:]] = np.einsum('ij,xyjl->xyil', Kx,  psi[0, x_elements, y_elements, :, y_points, 0]) # SCAFFOLDING: , 0, 0 and [1:]
+            Ky_psi[slices[1:]] = np.einsum('kl,xyjl->xyjk', Ky,  psi[0, x_elements, y_elements, x_points, :, 0]) # SCAFFOLDING: , 0, 0 and [1:]
         if boundary_element_slices and sum_at_edges:
             # Send values on the border to adjacent MPI tasks:
             self.MPI_send_border_kinetic(Kx_psi, Ky_psi)
@@ -419,9 +423,13 @@ class Simulator2D(object):
         # Now evaluate H_psi at the internal element slices:
         for slices in internal_element_slices:
             x_elements, y_elements, x_points, y_points = slices
-            Kx, Ky, U[slices], U_nonlinear[slices] = H(t, psi[0,:,:,:,:,0], *slices) # SCAFFOLDING: remove [0,:,:,:,:,0]
-            Kx_psi[slices] = np.einsum('ij,xyjl->xyil', Kx,  psi[0, x_elements, y_elements, :, y_points, 0]) # SCAFFOLDING: , 0, 0
-            Ky_psi[slices] = np.einsum('kl,xyjl->xyjk', Ky,  psi[0, x_elements, y_elements, x_points, :, 0]) # SCAFFOLDING: , 0, 0
+            slices = (FIRST,) + slices # SCAFFOLDING, remove
+            a, b, c, d = H(t, psi, *slices) # SCAFFOLDING, remove inetermediate varaibles and reshapes
+            c = c.reshape(U[slices[1:]].shape)
+            d = d.reshape(U_nonlinear[slices[1:]].shape)
+            Kx, Ky, U[slices[1:]], U_nonlinear[slices[1:]] = a, b, c, d # SCAFFOLDING, remove [1:]
+            Kx_psi[slices[1:]] = np.einsum('ij,xyjl->xyil', Kx,  psi[0, x_elements, y_elements, :, y_points, 0]) # SCAFFOLDING: , 0, 0
+            Ky_psi[slices[1:]] = np.einsum('kl,xyjl->xyjk', Ky,  psi[0, x_elements, y_elements, x_points, :, 0]) # SCAFFOLDING: , 0, 0
 
         if sum_at_edges:
             # Add contributions to Kx_psi and Ky_psi at edges shared by interior elements.
@@ -529,7 +537,10 @@ class Simulator2D(object):
 
         psi = np.array(psi_guess, dtype=complex)
 
-        Kx, Ky, U, U_nonlinear = H(t, psi[0,:,:,:,:,0], *ALL_ELEMENTS_AND_POINTS) # SCAFFOLDING: remove [0,:,:,:,:,0]
+        slices = (FIRST,) + ALL_ELEMENTS_AND_POINTS # SCAFFOLDING, remove
+        Kx, Ky, U, U_nonlinear = H(t, psi, *slices)
+        U = U.reshape(self.n_elements_x, self.n_elements_y, self.Nx, self.Ny) # SCAFFOLDING, remove
+        U_nonlinear = U_nonlinear.reshape(self.n_elements_x, self.n_elements_y, self.Nx, self.Ny) # SCAFFOLDING, remove
         # Get the diagonals of the nondiagonal part of the Hamiltonian, shape (1, 1,
         # Nx, Ny) if spatially homogenous, otherwise first two dimensions can have
         # sizes n_elements_x or n_elements_y:

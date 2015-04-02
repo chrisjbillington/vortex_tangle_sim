@@ -328,26 +328,25 @@ class FiniteElements2D(object):
         self.points_y = self.element_y.points + self.element_edges_y[:-1, np.newaxis]
         self.points_y = self.points_y.reshape((1, 1, n_elements_y, 1, Ny, 1))
 
-        # The product of the weights over the 2D space; shape (1, 1, Nx, Ny, 1, 1):
+        # The product of the weights over the 2D space; shape (Nx, Ny, 1):
         self.weights = np.outer(self.element_x.weights, self.element_y.weights)
-        self.weights = self.weights.reshape((1, 1, 1, Nx, Ny, 1))
+        self.weights = self.weights.reshape((Nx, Ny, 1))
 
-        # The values of each DVR basis function at its point; shape (1, 1, Nx, Ny, 1, 1):
+        # The values of each DVR basis function at its point; shape (Nx, Ny, 1):
         self.values = 1/np.sqrt(self.weights)
         # The basis functions at the edges have different normalisation, they
         # are 1/sqrt(2*w) rather than just 1/sqrt(w):
-        self.values[:, :, :, 0, :] /= np.sqrt(2)
-        self.values[:, :, :, -1, :] /= np.sqrt(2)
-        self.values[:, :, :, :, 0] /= np.sqrt(2)
-        self.values[:, :, :, :, -1] /= np.sqrt(2)
+        self.values[0, :] /= np.sqrt(2)
+        self.values[-1, :] /= np.sqrt(2)
+        self.values[:, 0] /= np.sqrt(2)
+        self.values[:, -1] /= np.sqrt(2)
 
     def density_operator(self):
         """Returns a 1D array of size self.N representing the diagonals of the
         density operator rho on an element. vec.conj()*rho*vec then gives the
         wavefunction density |psi|^2 at each quadrature point."""
         rho = self.values**2
-        # SCAFFOLDING: remove reshape:
-        return rho.reshape((self.Nx, self.Ny))
+        return rho
 
     def derivative_operators(self):
         """Returns a (1, 1, Nx, Ny, 1, Nx) array for the first derivative
