@@ -154,8 +154,6 @@ class Simulator2D(object):
                 data = (self.MPI_rank, self.processor_name,self.MPI_x_coord, self.MPI_y_coord,
                         self.global_first_x_element, self.global_first_y_element, self.n_elements_x, self.n_elements_y)
                 MPI_geometry_dset[self.MPI_rank] = data
-                f.create_dataset('x', data=self.x)
-                f.create_dataset('y', data=self.y)
                 f.create_group('output')
 
         # A dictionary for keeping track of what row we're up to in file
