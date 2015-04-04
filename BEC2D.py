@@ -113,10 +113,10 @@ class Simulator2D(object):
         # Derivative operators, shapes (Nx, Ny, 1, 1, Nx) and (Nx, Ny, 1, 1, Ny):
         self.gradx, self.grady = self.elements.derivative_operators()
         self.grad2x, self.grad2y = self.elements.second_derivative_operators()
-        self.grad2x[:, 0] *= 2 # SCAFFOLDING REMOVE
-        self.grad2x[:, -1] *= 2 # SCAFFOLDING REMOVE
-        self.grad2y[0] *= 2 # SCAFFOLDING REMOVE
-        self.grad2y[-1] *= 2 # SCAFFOLDING REMOVE
+        # self.grad2x[:, 0] *= 2 # SCAFFOLDING REMOVE
+        # self.grad2x[:, -1] *= 2 # SCAFFOLDING REMOVE
+        # self.grad2y[0] *= 2 # SCAFFOLDING REMOVE
+        # self.grad2y[-1] *= 2 # SCAFFOLDING REMOVE
 
         # Density operator. Is diagonal and so is represented as an (Nx, Ny, 1, 1)
         # array containing its diagonals:
@@ -546,8 +546,17 @@ class Simulator2D(object):
         # edges to get the full values of the diagonals there:
         Kx_diags[:, :, 0, :] *= 2
         Kx_diags[:, :, -1, :] *= 2
+        Kx_diags[:, :, :, 0] *= 2
+        Kx_diags[:, :, :, -1] *= 2
+        Ky_diags[:, :, 0, :] *= 2
+        Ky_diags[:, :, -1, :] *= 2
         Ky_diags[:, :, :, 0] *= 2
         Ky_diags[:, :, :, -1] *= 2
+
+        self.grad2x[:, 0] *= 2 # SCAFFOLDING REMOVE
+        self.grad2x[:, -1] *= 2 # SCAFFOLDING REMOVE
+        self.grad2y[0] *= 2 # SCAFFOLDING REMOVE
+        self.grad2y[-1] *= 2 # SCAFFOLDING REMOVE
 
         K_diags = Kx_diags + Ky_diags
 
