@@ -318,19 +318,19 @@ class FiniteElements2D(object):
         # operators on one of our dimensions, which have size > 1 in that
         # dimension, have the same rank as vectors, so that we can say,
         # multiply them easily.
-        self.shape = (self.n_components, self.n_elements_x, self.n_elements_y, self.Nx, self.Ny, 1)
+        self.shape = (self.n_elements_x, self.n_elements_y, self.Nx, self.Ny, self.n_components, 1)
 
-        # construct a (1, n_elements_x, 1, Nx, 1, 1) array for the quadrature points in
+        # construct a (n_elements_x, 1, Nx, 1, 1, 1) array for the quadrature points in
         # the x direction:
         self.points_x = self.element_x.points + self.element_edges_x[:-1, np.newaxis]
-        self.points_x = self.points_x.reshape((1, n_elements_x, 1, Nx, 1, 1))
-        # The same for the y direction, shape (1, 1, n_elements_y, 1, Ny, 1):
+        self.points_x = self.points_x.reshape((n_elements_x, 1, Nx, 1, 1, 1))
+        # The same for the y direction, shape (1, n_elements_y, 1, Ny, 1, 1):
         self.points_y = self.element_y.points + self.element_edges_y[:-1, np.newaxis]
-        self.points_y = self.points_y.reshape((1, 1, n_elements_y, 1, Ny, 1))
+        self.points_y = self.points_y.reshape((1, n_elements_y, 1, Ny, 1, 1))
 
-        # The product of the weights over the 2D space; shape (Nx, Ny, 1):
+        # The product of the weights over the 2D space; shape (Nx, Ny, 1, 1):
         self.weights = np.outer(self.element_x.weights, self.element_y.weights)
-        self.weights = self.weights.reshape((Nx, Ny, 1))
+        self.weights = self.weights.reshape((Nx, Ny, 1, 1))
 
         # The values of each DVR basis function at its point; shape (Nx, Ny, 1):
         self.values = 1/np.sqrt(self.weights)
@@ -349,8 +349,8 @@ class FiniteElements2D(object):
         return rho
 
     def derivative_operators(self):
-        """Returns a (Nx, Ny, Nx) array for the first derivative operator
-        on each element in the x direction, and a (Nx, Ny, Ny) array for
+        """Returns a (Nx, Ny, 1, Nx) array for the first derivative operator
+        on each element in the x direction, and a (Nx, Ny, 1, Ny) array for
         the first derivative operator on each element in the y direction. The
         reason both have size Nx, Ny in the Nx and Ny dimensions is that the x
         first derivative operator is halved on the y edges of an element, and
@@ -358,21 +358,21 @@ class FiniteElements2D(object):
         vectors at edges of elements, we get the right result. """
         gradx = self.element_x.second_derivative_operator()
         grady = self.element_y.second_derivative_operator()
-        gradx = gradx.reshape(self.Nx, 1, self.Nx)
-        grady = grady.reshape(1, self.Ny, self.Ny)
+        gradx = gradx.reshape(self.Nx, 1, 1, self.Nx)
+        grady = grady.reshape(1, self.Ny, 1, self.Ny)
         y_envelope = np.ones(self.Ny)
         y_envelope[0] = y_envelope[-1] = 0.5
         x_envelope = np.ones(self.Nx)
         x_envelope[0] = x_envelope[-1] = 0.5
-        x_envelope = x_envelope.reshape((self.Nx, 1, 1))
-        y_envelope = y_envelope.reshape((1, self.Ny, 1))
+        x_envelope = x_envelope.reshape((self.Nx, 1, 1, 1))
+        y_envelope = y_envelope.reshape((1, self.Ny, 1, 1))
         gradx = gradx * y_envelope
         grady = grady * x_envelope
         return gradx, grady
 
     def second_derivative_operators(self):
-        """Returns a (Nx, Ny, Nx) array for the second derivative operator
-        on each element in the x direction, and a (Nx, Ny, Ny) array for
+        """Returns a (Nx, Ny, 1, Nx) array for the second derivative operator
+        on each element in the x direction, and a (Nx, Ny, 1, Ny) array for
         the second derivative operator on each element in the y direction. The
         reason both have size Nx, Ny in the Nx and Ny dimensions is that the x
         second derivative operator is halved on the y edges of an element, and
@@ -380,14 +380,14 @@ class FiniteElements2D(object):
         vectors at edges of elements, we get the right result. """
         grad2x = self.element_x.second_derivative_operator()
         grad2y = self.element_y.second_derivative_operator()
-        grad2x = grad2x.reshape(self.Nx, 1, self.Nx)
-        grad2y = grad2y.reshape(1, self.Ny, self.Ny)
+        grad2x = grad2x.reshape(self.Nx, 1, 1, self.Nx)
+        grad2y = grad2y.reshape(1, self.Ny, 1, self.Ny)
         y_envelope = np.ones(self.Ny)
-        y_envelope[0] = y_envelope[-1] = 0.5
+        # y_envelope[0] = y_envelope[-1] = 0.5 # SCAFFOLDING, uncomment
         x_envelope = np.ones(self.Nx)
-        x_envelope[0] = x_envelope[-1] = 0.5
-        x_envelope = x_envelope.reshape((self.Nx, 1, 1))
-        y_envelope = y_envelope.reshape((1, self.Ny, 1))
+        # x_envelope[0] = x_envelope[-1] = 0.5 # SCAFFOLDING, uncomment
+        x_envelope = x_envelope.reshape((self.Nx, 1, 1, 1))
+        y_envelope = y_envelope.reshape((1, self.Ny, 1, 1))
         grad2x = grad2x * y_envelope
         grad2y = grad2y * x_envelope
         return grad2x, grad2y
