@@ -68,8 +68,8 @@ def plot_slices(psi, slices):
 def H(t, psi, *slices):
     # plot_slices(psi, slices)
     x_elements, y_elements, x_points, y_points = slices
-    Kx = -hbar**2/(2*m) * simulator.grad2x[x_points, y_points]
-    Ky = -hbar**2/(2*m) * simulator.grad2y[x_points, y_points]
+    Kx = -hbar**2/(2*m) * simulator.grad2x[x_points]
+    Ky = -hbar**2/(2*m) * simulator.grad2y[y_points]
     U = V[slices]
     U_nonlinear = g * psi[slices].conj() * simulator.density_operator[x_points, y_points] * psi[slices]
     return Kx, Ky, U, U_nonlinear

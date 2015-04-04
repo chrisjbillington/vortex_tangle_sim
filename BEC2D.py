@@ -110,13 +110,9 @@ class Simulator2D(object):
         self.shape = self.elements.shape
         self.global_shape = (self.n_elements_x_global, self.n_elements_y_global, self.Nx, self.Ny, self.n_components, 1)
 
-        # Derivative operators, shapes (Nx, Ny, 1, 1, Nx) and (Nx, Ny, 1, 1, Ny):
+        # Derivative operators, shapes (Nx, 1, 1, 1, Nx) and (Ny, 1, 1, Ny):
         self.gradx, self.grady = self.elements.derivative_operators()
         self.grad2x, self.grad2y = self.elements.second_derivative_operators()
-        # self.grad2x[:, 0] *= 2 # SCAFFOLDING REMOVE
-        # self.grad2x[:, -1] *= 2 # SCAFFOLDING REMOVE
-        # self.grad2y[0] *= 2 # SCAFFOLDING REMOVE
-        # self.grad2y[-1] *= 2 # SCAFFOLDING REMOVE
 
         # Density operator. Is diagonal and so is represented as an (Nx, Ny, 1, 1)
         # array containing its diagonals:
@@ -124,7 +120,7 @@ class Simulator2D(object):
 
         # The x spatial points of the DVR basis functions, an (n_elements_x, 1, Nx, 1, 1, 1) array:
         self.x = self.elements.points_x
-        # The y spatial points of the DVR basis functions, an (1, n_elements_y, 1, Ny, 1, 1) array:
+        # The y spatial points of the DVR basis functions, an (n_elements_y, 1, Ny, 1, 1) array:
         self.y = self.elements.points_y
 
         if natural_units:
@@ -411,7 +407,7 @@ class Simulator2D(object):
             x_elements, y_elements, x_points, y_points = slices
             Kx, Ky, U[slices], U_nonlinear[slices] = H(t, psi, *slices)
             Kx_psi[slices] = np.einsum('...nmci,...imcq->...nmcq', Kx,  psi[x_elements, y_elements, :, y_points])
-            Ky_psi[slices] = np.einsum('...nmcj,...njcq->...nmcq', Ky,  psi[x_elements, y_elements, x_points, :])
+            Ky_psi[slices] = np.einsum('...mcj,...jcq->...mcq', Ky,  psi[x_elements, y_elements, x_points, :])
 
         if boundary_element_slices and sum_at_edges:
             # Send values on the border to adjacent MPI tasks:
@@ -422,7 +418,7 @@ class Simulator2D(object):
             x_elements, y_elements, x_points, y_points = slices
             Kx, Ky, U[slices], U_nonlinear[slices] = H(t, psi, *slices)
             Kx_psi[slices] = np.einsum('...nmci,...imcq->...nmcq', Kx,  psi[x_elements, y_elements, :, y_points])
-            Ky_psi[slices] = np.einsum('...nmcj,...njcq->...nmcq', Ky,  psi[x_elements, y_elements, x_points, :])
+            Ky_psi[slices] = np.einsum('...mcj,...jcq->...mcq', Ky,  psi[x_elements, y_elements, x_points, :])
 
         if sum_at_edges:
             # Add contributions to Kx_psi and Ky_psi at edges shared by interior elements.
@@ -437,7 +433,7 @@ class Simulator2D(object):
 
         for slices in boundary_element_slices:
             K_psi[slices] = Kx_psi[slices] + Ky_psi[slices]
-        
+
         for slices in internal_element_slices:
             K_psi[slices] = Kx_psi[slices] + Ky_psi[slices]
 
@@ -456,7 +452,7 @@ class Simulator2D(object):
 
         # Expectation value and uncertainty of Hamiltonian gives the
         # expectation value and uncertainty of the chemical potential:
-        mucalc = self.global_dot(psi, H_psi.reshape(self.shape))/ncalc # SCAFFOLDING: remove reshape
+        mucalc = self.global_dot(psi, H_psi)/ncalc
         if uncertainty:
             mu2calc = self.global_dot(H_psi, H_psi)/ncalc
             var_mucalc = mu2calc - mucalc**2
@@ -537,26 +533,17 @@ class Simulator2D(object):
         # Broadcast Kx_diags to be the same shape as psi:
         Kx_diags = Kx_diags.reshape(Kx_diags.shape + (1,))
         Kx_diags = np.ones((self.n_elements_x, self.n_elements_y, self.Nx, self.Ny, self.n_components, 1)) * Kx_diags
-        Ky_diags = np.einsum('...nmcm->...nmc', Ky).copy()
+        Ky_diags = np.einsum('...mcm->...mc', Ky).copy()
         # Broadcast Ky_diags to be the same shape as psi:
         Ky_diags = Ky_diags.reshape(Ky_diags.shape + (1,))
         Ky_diags = np.ones((self.n_elements_x, self.n_elements_y, self.Nx, self.Ny, self.n_components, 1)) * Ky_diags
 
         # Instead of summing across edges we can just multiply by two at the
         # edges to get the full values of the diagonals there:
-        Kx_diags[:, :, 0, :] *= 2
-        Kx_diags[:, :, -1, :] *= 2
-        Kx_diags[:, :, :, 0] *= 2
-        Kx_diags[:, :, :, -1] *= 2
-        Ky_diags[:, :, 0, :] *= 2
-        Ky_diags[:, :, -1, :] *= 2
+        Kx_diags[:, :, 0] *= 2
+        Kx_diags[:, :, -1] *= 2
         Ky_diags[:, :, :, 0] *= 2
         Ky_diags[:, :, :, -1] *= 2
-
-        self.grad2x[:, 0] *= 2 # SCAFFOLDING REMOVE
-        self.grad2x[:, -1] *= 2 # SCAFFOLDING REMOVE
-        self.grad2y[0] *= 2 # SCAFFOLDING REMOVE
-        self.grad2y[-1] *= 2 # SCAFFOLDING REMOVE
 
         K_diags = Kx_diags + Ky_diags
 

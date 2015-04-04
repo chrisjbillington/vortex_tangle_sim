@@ -324,9 +324,9 @@ class FiniteElements2D(object):
         # the x direction:
         self.points_x = self.element_x.points + self.element_edges_x[:-1, np.newaxis]
         self.points_x = self.points_x.reshape((n_elements_x, 1, Nx, 1, 1, 1))
-        # The same for the y direction, shape (1, n_elements_y, 1, Ny, 1, 1):
+        # The same for the y direction, shape (n_elements_y, 1, Ny, 1, 1):
         self.points_y = self.element_y.points + self.element_edges_y[:-1, np.newaxis]
-        self.points_y = self.points_y.reshape((1, n_elements_y, 1, Ny, 1, 1))
+        self.points_y = self.points_y.reshape((n_elements_y, 1, Ny, 1, 1))
 
         # The product of the weights over the 2D space; shape (Nx, Ny, 1, 1):
         self.weights = np.outer(self.element_x.weights, self.element_y.weights)
@@ -349,47 +349,23 @@ class FiniteElements2D(object):
         return rho
 
     def derivative_operators(self):
-        """Returns a (Nx, Ny, 1, Nx) array for the first derivative operator
-        on each element in the x direction, and a (Nx, Ny, 1, Ny) array for
-        the first derivative operator on each element in the y direction. The
-        reason both have size Nx, Ny in the Nx and Ny dimensions is that the x
-        first derivative operator is halved on the y edges of an element, and
-        likewise for the y derivative operator. This is so that when we sum
-        vectors at edges of elements, we get the right result. """
+        """Returns a (Nx, 1, 1, Nx) array for the first derivative operator on
+        each element in the x direction, and a (Ny, 1, Ny) array for the first
+        derivative operator on each element in the y direction."""
         gradx = self.element_x.second_derivative_operator()
         grady = self.element_y.second_derivative_operator()
         gradx = gradx.reshape(self.Nx, 1, 1, self.Nx)
-        grady = grady.reshape(1, self.Ny, 1, self.Ny)
-        y_envelope = np.ones(self.Ny)
-        y_envelope[0] = y_envelope[-1] = 0.5
-        x_envelope = np.ones(self.Nx)
-        x_envelope[0] = x_envelope[-1] = 0.5
-        x_envelope = x_envelope.reshape((self.Nx, 1, 1, 1))
-        y_envelope = y_envelope.reshape((1, self.Ny, 1, 1))
-        gradx = gradx * y_envelope
-        grady = grady * x_envelope
+        grady = grady.reshape(self.Ny, 1, self.Ny)
         return gradx, grady
 
     def second_derivative_operators(self):
-        """Returns a (Nx, Ny, 1, Nx) array for the second derivative operator
-        on each element in the x direction, and a (Nx, Ny, 1, Ny) array for
-        the second derivative operator on each element in the y direction. The
-        reason both have size Nx, Ny in the Nx and Ny dimensions is that the x
-        second derivative operator is halved on the y edges of an element, and
-        likewise for the y derivative operator. This is so that when we sum
-        vectors at edges of elements, we get the right result. """
+        """Returns a (Nx, 1, 1, Nx) array for the second derivative operator
+        on each element in the x direction, and a (Ny, 1, Ny) array for the
+        second derivative operator on each element in the y direction."""
         grad2x = self.element_x.second_derivative_operator()
         grad2y = self.element_y.second_derivative_operator()
         grad2x = grad2x.reshape(self.Nx, 1, 1, self.Nx)
-        grad2y = grad2y.reshape(1, self.Ny, 1, self.Ny)
-        x_envelope = np.ones(self.Nx)
-        y_envelope = np.ones(self.Ny)
-        x_envelope[0] = x_envelope[-1] = 0.5
-        y_envelope[0] = y_envelope[-1] = 0.5
-        x_envelope = x_envelope.reshape((self.Nx, 1, 1, 1))
-        y_envelope = y_envelope.reshape((1, self.Ny, 1, 1))
-        grad2x = grad2x * y_envelope
-        grad2y = grad2y * x_envelope
+        grad2y = grad2y.reshape(self.Ny, 1, self.Ny)
         return grad2x, grad2y
 
     def interpolate_vector(self, psi, npts_x, npts_y):
