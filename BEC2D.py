@@ -164,9 +164,9 @@ class Simulator2D(object):
 
         # Slices for convenient indexing:
         EDGE_POINTS_X = np.s_[::self.Nx-1]
-        EDGE_POINTS_Y = np.s_[::self.Nx-1]
+        EDGE_POINTS_Y = np.s_[::self.Ny-1]
         BOUNDARY_ELEMENTS_X = np.s_[::self.n_elements_x-1]
-        BOUNDARY_ELEMENTS_Y = np.s_[::self.n_elements_x-1]
+        BOUNDARY_ELEMENTS_Y = np.s_[::self.n_elements_y-1]
 
         # These are for indexing all edges of all boundary elements. The below
         # four sets of slices used in succession cover the edges of boundary

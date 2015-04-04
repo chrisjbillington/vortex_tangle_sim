@@ -81,7 +81,8 @@ def plot(psi, output_log, raw=False):
         import matplotlib
         global image_item
         if raw:
-            psi_interp = psi.transpose(0,1,3,2,4,5).reshape((n_elements_x_global*Nx, n_elements_y_global*Ny))
+            # psi = psi*simulator.elements.values
+            psi_interp = psi.transpose(0,2,1,3,4,5).reshape((simulator.n_elements_x*Nx, simulator.n_elements_y*Ny))
         else:
             x_plot, y_plot, psi_interp = simulator.elements.interpolate_vector(psi, Nx, Ny)
         rho = np.abs(psi_interp)**2
@@ -95,7 +96,7 @@ def plot(psi, output_log, raw=False):
         if image_item is None:
             image_item = pg.ImageItem(rgb)
             view_box.addItem(image_item)
-            graphics_view.resize(2*rgb.shape[0], 2*rgb.shape[1])
+            # graphics_view.resize(2*rgb.shape[0], 2*rgb.shape[1])
             # graphics_view.move(0,0)
             graphics_view.show()
         image_item.updateImage(rgb.transpose(1,0,2)[:,::-1])
