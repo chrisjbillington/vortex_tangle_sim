@@ -51,7 +51,22 @@ Ky = -hbar**2/(2*m) * simulator.grad2y
 # The Harmonic trap at our gridpoints, shape (n_components, n_elements_x, n_elements_y, Nx, Ny, 1):
 V = 0.5*m*omega**2*(x**2 + y**2)
 
+psi_global = None
+def plot_slices(psi, slices):
+    global psi_global
+    if psi_global is None:
+        psi_global = psi.copy()
+        psi_global[:] = 0
+    psi_global[psi_global==1] = 0.89
+    if not (psi_global<0.8).sum():
+        psi_global[:] = 0
+    psi_global[slices] = 1
+    plot(psi_global, None, raw=True)
+    import time
+    time.sleep(1.0)
+
 def H(t, psi, *slices):
+    # plot_slices(psi, slices)
     component, x_elements, y_elements, x_points, y_points = slices
     Kx = -hbar**2/(2*m) * simulator.grad2x[x_points, :]
     Ky = -hbar**2/(2*m) * simulator.grad2y[y_points, :]
@@ -59,12 +74,16 @@ def H(t, psi, *slices):
     U_nonlinear = g * psi[slices].conj() * simulator.density_operator[x_points, y_points] * psi[slices]
     return Kx, Ky, U, U_nonlinear
 
+
 @inmain_decorator()
-def plot(psi, output_log):
+def plot(psi, output_log, raw=False):
     if SHOW_PLOT:
         import matplotlib
         global image_item
-        x_plot, y_plot, psi_interp = simulator.elements.interpolate_vector(psi, Nx, Ny)
+        if raw:
+            psi_interp = psi.transpose(0,1,3,2,4,5).reshape((n_elements_x_global*Nx, n_elements_y_global*Ny))
+        else:
+            x_plot, y_plot, psi_interp = simulator.elements.interpolate_vector(psi, Nx, Ny)
         rho = np.abs(psi_interp)**2
         phase = np.angle(psi_interp)
 
@@ -77,9 +96,9 @@ def plot(psi, output_log):
             image_item = pg.ImageItem(rgb)
             view_box.addItem(image_item)
             graphics_view.resize(2*rgb.shape[0], 2*rgb.shape[1])
-            graphics_view.move(0,0)
+            # graphics_view.move(0,0)
             graphics_view.show()
-        image_item.updateImage(rgb)
+        image_item.updateImage(rgb.transpose(1,0,2)[:,::-1])
 
 SHOW_PLOT = True
 SHOW_PLOT = False
