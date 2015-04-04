@@ -381,17 +381,21 @@ class FiniteElements2D(object):
         # The array of points within an element:
         x = np.linspace(0, self.element_width_x, npts_x, endpoint=False)
         y = np.linspace(0, self.element_width_y, npts_y, endpoint=False)
-        f = np.zeros((self.n_components, self.n_elements_x, self.n_elements_y, npts_x, npts_y), dtype=complex)
+        f = np.zeros((self.n_elements_x, self.n_elements_y, self.n_components, npts_x, npts_y), dtype=complex)
         for j, basis_function_x in enumerate(self.element_x.basis):
             for k, basis_function_y in enumerate(self.element_y.basis):
-                f += (psi[:, :, :, j, k, 0, np.newaxis, np.newaxis] *
+                f += (psi[:, :, j, k, :, 0, np.newaxis, np.newaxis] *
                       basis_function_x(x[:, np.newaxis]) *
                       basis_function_y(y[np.newaxis, :]))
 
-        x_all = (x + self.element_edges_x[:-1, np.newaxis]).reshape((1, self.n_elements_x * npts_x, 1))
-        y_all = (y + self.element_edges_y[:-1, np.newaxis]).reshape((1, 1, self.n_elements_y * npts_y))
-        shape = (self.n_elements_x * npts_x, self.n_elements_y * npts_y)
-        f_reshaped = f.transpose(0, 1, 3, 2, 4).reshape(shape)
+        x_all = (x + self.element_edges_x[:-1, np.newaxis]).reshape((self.n_elements_x * npts_x, 1))
+        y_all = (y + self.element_edges_y[:-1, np.newaxis]).reshape(self.n_elements_y * npts_y)
+        shape = (self.n_elements_x * npts_x, self.n_elements_y * npts_y, self.n_components)
+        if self.n_components == 1:
+            # Don't bother having a unit-length dimension for component when
+            # there is only one:
+            shape = shape[:-1]
+        f_reshaped = f.transpose(0, 3, 1, 4, 2).reshape(shape)
 
         return x_all, y_all, f_reshaped
 

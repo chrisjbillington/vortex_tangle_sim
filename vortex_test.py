@@ -101,7 +101,7 @@ def plot(psi, output_log, raw=False):
         image_item.updateImage(rgb.transpose(1,0,2)[:,::-1])
 
 SHOW_PLOT = True
-SHOW_PLOT = False
+# SHOW_PLOT = False
 if not os.getenv('DISPLAY'):
     # But not if there is no x server:
     SHOW_PLOT = False
