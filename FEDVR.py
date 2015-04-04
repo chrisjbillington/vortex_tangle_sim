@@ -382,10 +382,10 @@ class FiniteElements2D(object):
         grad2y = self.element_y.second_derivative_operator()
         grad2x = grad2x.reshape(self.Nx, 1, 1, self.Nx)
         grad2y = grad2y.reshape(1, self.Ny, 1, self.Ny)
-        y_envelope = np.ones(self.Ny)
-        # y_envelope[0] = y_envelope[-1] = 0.5 # SCAFFOLDING, uncomment
         x_envelope = np.ones(self.Nx)
-        # x_envelope[0] = x_envelope[-1] = 0.5 # SCAFFOLDING, uncomment
+        y_envelope = np.ones(self.Ny)
+        x_envelope[0] = x_envelope[-1] = 0.5
+        y_envelope[0] = y_envelope[-1] = 0.5
         x_envelope = x_envelope.reshape((self.Nx, 1, 1, 1))
         y_envelope = y_envelope.reshape((1, self.Ny, 1, 1))
         grad2x = grad2x * y_envelope

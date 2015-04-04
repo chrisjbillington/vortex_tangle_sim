@@ -108,19 +108,23 @@ class Simulator2D(object):
                                          n_components, self.x_min, self.x_max, self.y_min, self.y_max)
 
         self.shape = self.elements.shape
-        self.global_shape = (self.n_elements_x_global, self.n_elements_y_global, self.Nx, self.Ny)
+        self.global_shape = (self.n_elements_x_global, self.n_elements_y_global, self.Nx, self.Ny, self.n_components, 1)
 
         # Derivative operators, shapes (Nx, Ny, 1, 1, Nx) and (Nx, Ny, 1, 1, Ny):
         self.gradx, self.grady = self.elements.derivative_operators()
         self.grad2x, self.grad2y = self.elements.second_derivative_operators()
+        self.grad2x[:, 0] *= 2 # SCAFFOLDING REMOVE
+        self.grad2x[:, -1] *= 2 # SCAFFOLDING REMOVE
+        self.grad2y[0] *= 2 # SCAFFOLDING REMOVE
+        self.grad2y[-1] *= 2 # SCAFFOLDING REMOVE
 
         # Density operator. Is diagonal and so is represented as an (Nx, Ny, 1, 1)
         # array containing its diagonals:
         self.density_operator = self.elements.density_operator()
 
-        # The x spatial points of the DVR basis functions, an (n_elements_x, 1, Nx, 1, 1) array:
+        # The x spatial points of the DVR basis functions, an (n_elements_x, 1, Nx, 1, 1, 1) array:
         self.x = self.elements.points_x
-        # The y spatial points of the DVR basis functions, an (1, n_elements_y, 1, Ny, 1) array:
+        # The y spatial points of the DVR basis functions, an (1, n_elements_y, 1, Ny, 1, 1) array:
         self.y = self.elements.points_y
 
         if natural_units:
@@ -784,10 +788,10 @@ class Simulator2D(object):
             end_y = start_y + self.n_elements_y
 
             output_row = self.output_row.setdefault(output_group, 0)
-            psi_dataset.resize((output_row + 1,) + psi.shape[1:-1]) # SCAFFOLDING: remove [1:-1]
+            psi_dataset.resize((output_row + 1,) + psi.shape)
             output_log_dataset.resize((output_row + 1,))
 
-            psi_dataset[output_row, start_x:end_x, start_y:end_y, :, :] = psi[0,:,:,:,:,0] # SCAFFOLDING: remove [0,:,:,:,:,0]
+            psi_dataset[output_row, start_x:end_x, start_y:end_y, :, :] = psi
             output_log_dataset[output_row] = output_log
 
         self.output_row[output_group] += 1
