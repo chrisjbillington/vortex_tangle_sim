@@ -124,8 +124,6 @@ def initial_guess(x, y):
     return f
 
 def run_sims():
-    # import lineprofiler
-    # lineprofiler.setup(outfile='lineprofile-%d.txt'%MPI_rank)
     try:
         psi = simulator.elements.make_vector(initial_guess)
         simulator.normalise(psi, N_2D)

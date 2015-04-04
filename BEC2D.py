@@ -382,10 +382,10 @@ class Simulator2D(object):
             Kx_psi = np.empty(psi.shape, dtype=psi.dtype)
             Ky_psi = np.empty(psi.shape, dtype=psi.dtype)
             K_psi = np.empty(psi.shape, dtype=psi.dtype)
-            U = np.empty(psi.shape, dtype=psi.dtype)
+            U_psi = np.empty(psi.shape, dtype=psi.dtype)
             U_nonlinear = np.empty(psi.shape, dtype=psi.dtype)
         else:
-            Kx_psi, Ky_psi, K_psi, U, U_nonlinear = outarrays
+            Kx_psi, Ky_psi, K_psi, U_psi, U_nonlinear = outarrays
 
         # Compute H_psi at the boundary elements first, before firing off data
         # to other MPI tasks. Then compute H_psi on the internal elements,
@@ -405,9 +405,10 @@ class Simulator2D(object):
         # Evaluate H_psi at the boundary element slices, if any:
         for slices in boundary_element_slices:
             x_elements, y_elements, x_points, y_points = slices
-            Kx, Ky, U[slices], U_nonlinear[slices] = H(t, psi, *slices)
+            Kx, Ky, U, U_nonlinear[slices] = H(t, psi, *slices)
             Kx_psi[slices] = np.einsum('...nmci,...imcq->...nmcq', Kx,  psi[x_elements, y_elements, :, y_points])
             Ky_psi[slices] = np.einsum('...mcj,...jcq->...mcq', Ky,  psi[x_elements, y_elements, x_points, :])
+            U_psi[slices] = np.einsum('...cl,...lq->...cq', U,  psi[slices])
 
         if boundary_element_slices and sum_at_edges:
             # Send values on the border to adjacent MPI tasks:
@@ -416,9 +417,10 @@ class Simulator2D(object):
         # Now evaluate H_psi at the internal element slices:
         for slices in internal_element_slices:
             x_elements, y_elements, x_points, y_points = slices
-            Kx, Ky, U[slices], U_nonlinear[slices] = H(t, psi, *slices)
+            Kx, Ky, U, U_nonlinear[slices] = H(t, psi, *slices)
             Kx_psi[slices] = np.einsum('...nmci,...imcq->...nmcq', Kx,  psi[x_elements, y_elements, :, y_points])
             Ky_psi[slices] = np.einsum('...mcj,...jcq->...mcq', Ky,  psi[x_elements, y_elements, x_points, :])
+            U_psi[slices] = np.einsum('...cl,...lq->...cq', U,  psi[slices])
 
         if sum_at_edges:
             # Add contributions to Kx_psi and Ky_psi at edges shared by interior elements.
@@ -437,15 +439,15 @@ class Simulator2D(object):
         for slices in internal_element_slices:
             K_psi[slices] = Kx_psi[slices] + Ky_psi[slices]
 
-        return K_psi, U, U_nonlinear
+        return K_psi, U_psi, U_nonlinear
 
     def compute_mu(self, t, psi, H, uncertainty=False):
         """Calculate chemical potential of DVR basis wavefunction psi with
         Hamiltonian H at time t. Optionally return its uncertainty."""
 
         # Total Hamiltonian operator operating on psi:
-        K_psi, U, U_nonlinear = self.compute_H(t, psi, H)
-        H_psi = K_psi + (U + U_nonlinear) * psi
+        K_psi, U_psi, U_nonlinear = self.compute_H(t, psi, H)
+        H_psi = K_psi + U_psi + U_nonlinear * psi
 
         # Total norm:
         ncalc = self.compute_number(psi)
@@ -495,24 +497,17 @@ class Simulator2D(object):
         potential using successive over-relaxation.
 
         H(t, psi, x_elements, y_elements, x_points, y_points) should return
-        three arrays, K_psi, U, and U_nonlinear, each corresponding to
-        different terms in the Hamiltonian operating on psi. The first array,
-        K_psi, should be the kinetic energy operator acting on psi. This
-        should comprise only linear combinations of the derivative operators
-        provided by this class, acting on psi. MPI communication will be
-        performed on this array to include contributions from adjacent MPI
-        tasks. K_psi should include any terms that contain derivatives, such
+        four arrays, Kx, Ky, U, and U_nonlinear, each corresponding to
+        different terms in the Hamiltonian. The first two arrays, Kx and Ky,
+        should be the kinetic energy operators. These should comprise only
+        linear combinations of the derivative operators provided by this
+        class. They should  include any terms that contain derivatives, such
         as rotation terms with first derivatives. The second array returned
-        must be the sum of terms that are diagonal in the spatial basis, i.e,
-        no derivative operators, and must be linear in psi. This is typically
-        the potential and and couplings between states. The third array ,
+        must be the sum of terms (except the nonlinear one) that are diagonal
+        in the spatial basis, i.e, no derivative operators. This is typically
+        the potential and and couplings between states. The third array,
         U_nonlinear, must be the nonlinear term, and can be constructed by
-        multiplying the nonlinear constant by self.density_operator. U and
-        U_nonlinear should not be multiplied by psi before being returned.
-
-        K_diags(x, y) should return the diagonals of the kinetic part of the
-        Hamiltonian only, that is, the part of the Hamiltonian corresponding
-        to the first array returned by H_psi (but not acting on psi).
+        multiplying the nonlinear constant by self.density_operator.
 
         mu should be the desired chemical potential.
 
@@ -547,10 +542,18 @@ class Simulator2D(object):
 
         K_diags = Kx_diags + Ky_diags
 
+        # The diagonal part of U, which is just the potential at each point in
+        # space, shape (n_elements_x, n_elements_y, Nx, Ny, n_components, 1):
+        U_diags = np.einsum('...cc->...c', U).copy()
+        # Broadcast U_diags to be the same shape as psi:
+        U_diags = U_diags.reshape(U_diags.shape + (1,))
+        U_diags = np.ones((self.n_elements_x, self.n_elements_y, self.Nx, self.Ny, self.n_components, 1)) * U_diags
+
         # Empty arrays for re-using each step:
         Kx_psi = np.zeros(psi.shape, dtype=complex)
         Ky_psi = np.zeros(psi.shape, dtype=complex)
         K_psi = np.zeros(psi.shape, dtype=complex)
+        U_psi = np.zeros(psi.shape, dtype=complex)
         H_diags = np.zeros(psi.shape, dtype=complex)
         H_hollow_psi = np.zeros(psi.shape, dtype=complex)
         psi_new_GS = np.zeros(psi.shape, dtype=complex)
@@ -632,16 +635,16 @@ class Simulator2D(object):
                     self.compute_H(t, psi, H,
                                    boundary_element_slices=BOUNDARY_ELEMENT_EDGES,
                                    internal_element_slices=INTERIOR_ELEMENT_EDGES,
-                                   outarrays=(Kx_psi, Ky_psi, K_psi, U, U_nonlinear))
+                                   outarrays=(Kx_psi, Ky_psi, K_psi, U_psi, U_nonlinear))
                 else:
                     # Evaluate H_psi at a single DVR point in all elements, requires no MPI communication:
                     self.compute_H(t, psi, H,
                                    internal_element_slices=(slices,),
                                    sum_at_edges=False,
-                                   outarrays=(Kx_psi, Ky_psi, K_psi, U, U_nonlinear))
+                                   outarrays=(Kx_psi, Ky_psi, K_psi, U_psi, U_nonlinear))
 
                 # Diagonals of the total Hamiltonian operator at the DVR point(s):
-                H_diags[slices] = K_diags[slices] + U[slices] + U_nonlinear[slices]
+                H_diags[slices] = K_diags[slices] + U_diags[slices] + U_nonlinear[slices]
 
                 # Hamiltonian with diagonals subtracted off, operating on psi at the DVR point(s):
                 H_hollow_psi[slices] = K_psi[slices] - K_diags[slices] * psi[slices]
